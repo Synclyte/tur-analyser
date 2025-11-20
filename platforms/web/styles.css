@@ -6,9 +6,10 @@
     --font-family-heading: 'Outfit', sans-serif;
     --font-family-mono: 'Fira Code', monospace;
 
-    --background-color: #F8F9FA;
-    --surface-color: #FFFFFF; /* Pure white for cards/panels */
-    --text-color: #212529;
+    --background-color: #202122;
+    --surface-color: #343131;
+    --tertiary-dark-color: #131313;
+    --text-color: #c5c9ce;
     --text-muted-color: #6C757D;
 
     --border-color: #DEE2E6;
@@ -27,6 +28,10 @@
     --success-bg: #E8F5E9;
     --warning-bg: #FFF8E1;
     --danger-bg: #FFEBEE;
+
+    --color-base-100: oklch(31.714% 0.00004 271.152);
+    --color-base-200: oklch(31.714% 0.00004 271.152);
+    --color-base-300: oklch(31.714% 0.00004 271.152);
 
     --shadow: 0 2px 12px rgba(0,0,0,0.08);
     --shadow-hover: 0 4px 16px rgba(0,0,0,0.12);
@@ -183,7 +188,7 @@ body {
 
 .tape-cell.under-head {
     border-color: var(--accent-color);
-    background-color: #eaf3fe;
+    background-color: var(--tertiary-dark-color);
     color: var(--accent-color);
     box-shadow: 0 0 0 2px rgba(0, 123, 255, 0.2);
 }
@@ -289,7 +294,7 @@ body {
 
 .state-item {
     padding: 0.75rem;
-    background: #f0f7ff; /* Brighter shade */
+    background: var(--background-color);
     border-radius: var(--border-radius);
 }
 
@@ -312,7 +317,7 @@ body {
 
 .symbol {
     font-family: var(--font-family-mono);
-    background: #fff;
+    background: #000000;
     padding: 2px 6px;
     border-radius: 4px;
     font-feature-settings: "liga" 1, "calt" 1;
@@ -504,7 +509,7 @@ body {
 .editor-help button {
   border: none;
   font-size: 1.1rem;
-  background-color: rgba(255, 255, 255, 0.2);
+  background-color: var(--surface-color);
   opacity: 0.5;
   box-shadow: none;
 }
@@ -618,7 +623,7 @@ body {
     font-family: var(--font-family-mono);
     font-size: 0.85em;
     line-height: 1;
-    color: #444;
+    color: var(--text-color);
     background-color: #f7f7f7;
     border: 1px solid #ccc;
     border-radius: 3px;
@@ -632,7 +637,7 @@ body {
     height: 400px !important;
     border: none !important;
     border-radius: var(--border-radius) !important;
-    background: #F5F7FA !important;
+    background: var(--tertiary-dark-color) !important;
 }
 
 .visualization-section {
@@ -754,4 +759,10 @@ body {
 
 .socials img {
     height: 20px;
+}
+
+.input-stack {
+    text-align: center;
+    flex-direction: column;
+    align-items: stretch;
 }

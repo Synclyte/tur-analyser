@@ -29,7 +29,7 @@ regex = "1.10"
 [package]
 name = "tur"
 version = "0.1.0"
-description = "Turing Machine Language - Parser, interpreter, and execution engine"
+description = "TUR with added runtime analytics"
 authors.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -46,6 +46,7 @@ thiserror.workspace = true
 lazy_static = "1.4"
 pest = "2.0"
 pest_derive = "2.0"
+rand = "0.9.2"
 
 [dev-dependencies]
 tempfile = "3.8"

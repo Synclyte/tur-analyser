@@ -68,6 +68,14 @@ pub fn tape_view(props: &TapeViewProps) -> Html {
                             <option value="125" selected={props.speed == 125}>{"4x"}</option>
                         </select>
                     </div>
+
+                    <div class="speed-control">
+                        <label for="speed-select">{"Speed: "}</label>
+                        <div class="input-stack">
+                            <input type="range" min="1" max="100"/>
+                            <div id="speed-num">{"1.0x"}</div>
+                        </div>
+                    </div>
                 </div>
             </div>
             <div class="tapes-container">

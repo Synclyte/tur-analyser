@@ -9,6 +9,7 @@ pub mod machine;
 pub mod parser;
 pub mod programs;
 pub mod types;
+pub mod expression;
 
 /// Re-exports the `Rule` enum from the parser module, used by the `pest` grammar.
 pub use crate::parser::Rule;
