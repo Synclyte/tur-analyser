@@ -1,14 +1,67 @@
-use std::{ops::Range, string, usize, vec};
+use std::{collections::HashMap, fmt::format, ops::{Index, Range}, usize, vec};
 use rand::Rng;
 
-const REPEAT_LIMIT: usize = 1000;
+const REPEAT_LIMIT: usize = 256;
 
 enum Token {
     None,
     Literal(String),
-    Repetition(Box<Token>, Range<usize>),
+    Repetition(Box<Token>, Bound, Bound),
     Choice(Vec<Token>),
     Sequence(Vec<Token>),
+}
+
+struct ContextToken {
+    token: Token,
+    context: HashMap<String, usize>,
+}
+
+enum Operation {
+    Add,
+    Subtract,
+    Multiply,
+}
+
+enum Bound {
+    None,
+    Literal(usize),
+    Variable(String),
+    Calculation(Box<Bound>, Operation, Box<Bound>)
+}
+
+impl Bound {
+    fn calculate_bound(bound: &Bound, context: &HashMap<String, usize>) -> Result<usize, String> {
+        return match bound {
+            Bound::Literal(value) => Ok(*value),
+            Bound::Variable(value) => context.get(value).ok_or_else(|| format!("Error: Calculation error - no value provided for variable '{}'", value)).copied(),
+            Bound::Calculation(first, operator, last) => {
+                let first_result: usize = Bound::calculate_bound(first.as_ref(), context)?;
+                let last_result: usize = Bound::calculate_bound(last.as_ref(), context)?;
+                match operator {
+                    Operation::Add => Ok((first_result + last_result).min(REPEAT_LIMIT)),
+                    Operation::Multiply => Ok((first_result * last_result).min(REPEAT_LIMIT)),
+                    Operation::Subtract => first_result.checked_sub(last_result).ok_or_else(|| "Error: Calculation error - bound cannot be below 0".to_string()),
+                }
+            }
+            Bound::None => Err("Error: Calculation error - encountered None type bound during calculation".to_string()),
+        } 
+    }
+
+    fn get_string(bound: &Bound) -> String {
+        return match bound {
+            Bound::Literal(lit) => lit.to_string(),
+            Bound::Variable(var) => var.to_string(),
+            Bound::Calculation(first_expression, operation, last_expression) => {
+                let operation_string: &str = match operation {
+                    Operation::Add => " + ",
+                    Operation::Multiply => " * ",
+                    Operation::Subtract => " - ",
+                };
+                return Bound::get_string(first_expression.as_ref()) + operation_string + &Bound::get_string(last_expression.as_ref());
+            }
+            Bound::None => "".to_string(),
+        }
+    }
 }
 
 /// a structure designed to take a `String` and convert it into a regex-like `Expression` to generate inputs for machines
@@ -17,218 +70,316 @@ enum Token {
 /// *    `a` - matches `char` "a"
 /// *    `(ab)` - matches `String` "ab"
 /// # choices (picks a literal from a list)
-/// *    `[abcd]` - matches either `a`, `b`, `c`, or `d`
-/// *    `[ab(cd)]` - matches `a`, `b`, or `cd`
+/// *    `a|b|c|d` - matches either `a`, `b`, `c`, or `d`
+/// *    `a|b|cd` - matches `a`, `b`, or `cd`
 /// # repetitions (repeats a given segment n times)
 /// *    `*` - 0 to infinity repetitions of literal
 /// *    `+` - 1 to infinity repetitions of literal
 /// *    `?` - 0 or 1 repetition of literal
 /// *    `{a,b}` - a to b repetitions of literal
-/// *    `[ab(cd)]{3,12}` - matches `a`, `b`, or `cd` between 3 and 12 times
-struct ExpressionParser {}
+/// *    `(ab|cd){3,12}` - matches `ab`, or `cd` between 3 and 12 times
+/// *    `(ab|cd){1+a,2*b-3}` - matches `ab`, or `cd` between 1+a and 2*b-3 times
+struct ExpressionParser {
+    context: HashMap<String, usize>,
+}
 
 impl ExpressionParser {
     fn new() -> Self {
-        return ExpressionParser { };
+        return ExpressionParser { context: HashMap::new() };
     }
 
-    pub fn produce_token(expression: String) -> Result<Token, String> {
-        let parser: ExpressionParser = ExpressionParser::new();
+    pub fn produce_token(expression: String) -> Result<ContextToken, String> {
+        let mut parser: ExpressionParser = ExpressionParser::new();
         let mut cleaned_vector_expression: Vec<char> = Self::format_input_string(&parser, expression);
-        let output_token: Token = Self::parse_string(&parser, &mut cleaned_vector_expression)?;
+        let output_token: Token = Self::parse_string(&mut parser, &mut cleaned_vector_expression)?;
 
-        return Ok(output_token);
+        return Ok(ContextToken{token: output_token, context: parser.context});
     }
 
-    fn parse_string(&self, c_vec: &Vec<char>) -> Result<Token, String> {
+    fn parse_string(&mut self, c_vec: &Vec<char>) -> Result<Token, String> {
         let index: usize = 0;
-        let result_pair: (Vec<Token>, usize) = self.parse_chars(c_vec, '\0', index)?;
+        let result_pair: (Token, usize) = self.parse_chars(c_vec, '\0', index)?;
 
-        return Ok(Token::Sequence(result_pair.0));
+        return Ok(result_pair.0);
     }
 
-    /// * parses a given `Vec<char>` segment into a `Token::Choice` - just checks for errors and calls `self.parse_chars`
-    fn parse_choice(&self, c_vec: &Vec<char>, mut index: usize) -> Result<(Token, usize), String> {
-        if c_vec.len() < 3 {
-            return Err("Invalid choice - choices must be at least 3 characters long".to_string())
+    /// checks for errors in a given literal, and returns a Token::Literal containing the given `Vec<char>` if none are found
+    fn parse_literal(&self, c_vec: Vec<char>, index: usize) -> Result<(Token, usize), String> {
+        let min_length: usize = 1;
+        let initial_length: usize = c_vec.len();
+        if initial_length < min_length {
+            return Err(format!("Error: Received invalid literal - literals must be at least {} character(s) long", min_length))
         }
-        if c_vec[index] != '[' {
-            return Err("Invalid choice - choices must begin with '['".to_string());
-        }
-        index += 1;
 
-        let result_pair: (Vec<Token>, usize) = self.parse_chars(c_vec, ']', index)?;
-        let token_vec = result_pair.0;
-        index = result_pair.1;
-
-        return Ok((Token::Choice(token_vec), index));
-    }
-
-    /// * parses a given literal, enclosed by (), and returns a `Token` containing it
-    /// * does not support nesting of choices and repetitions - just parses pure literals
-    /// * returns a `Token::Literal` containing the enclosed `String`
-    fn parse_literal(&self, c_vec: &Vec<char>, mut index: usize) -> Result<(Token, usize), String> {
-        if c_vec.len() < 2 {
-            return Err("Invalid literal - literals must be at least 2 characters long".to_string())
-        }
-        let mut next_char: char = c_vec[index];
-        if next_char != '(' {
-            return Err("Invalid literal - literals must begin with '('".to_string());
-        }
-        // processes starting character before adding string
-        index += 1;
-        next_char = c_vec[index];
-
-        let mut literal_vec: Vec<char> = Vec::new();
-        while next_char != ')' {
+        for next_char in &c_vec {
             match next_char {
                 '[' | '(' | '{' => {
-                    return Err(format!("Invalid character in literal ('{}') at index {} - literals do not support nesting", next_char, index));
+                    return Err(format!("Error: Received invalid character in literal ('{}') at index {} - literals do not support nesting", next_char, index));
                 }
-                ']' | '}' => {
-                    return Err(format!("Invalid character in literal ('{}') at index {} - expected literal end before other closures", next_char, index));
+                ']' | ')' | '}'=> {
+                    return Err(format!("Error: Received invalid character in literal ('{}') at index {} - invalid closure", next_char, index));
                 }
-                _ => {
-                    literal_vec.push(next_char);
-                }
-            }
-
-            if !c_vec.is_empty() {
-                index += 1;
-                next_char = c_vec[index];
-            }
-            else {
-                return Err("Failed to find matching exit char in literal (')')".to_string());
+                _ => {}
             }
         }
-        return Ok((Token::Literal(literal_vec.into_iter().collect()), index));
+        return Ok((Token::Literal(c_vec.iter().collect()), index + initial_length));
     }
 
     /// * generic parsing function. processes a given `Vec<char>` considering the next character
-    /// * returns a `Vec<token>`, containing all `Token`s at this 'level' of the tree
-    fn parse_chars<'a>(&self, c_vec: &Vec<char>, exit_char: char, mut index: usize) -> Result<(Vec<Token>, usize), String> {
+    /// * returns a `Token::Choice` or a `Token::Sequence`, containing all `Token`s at this 'level' of the tree
+    fn parse_chars(&mut self, c_vec: &Vec<char>, exit_char: char, mut index: usize) -> Result<(Token, usize), String> {
+        let special_chars: Vec<char> = vec!['(', '|', '{', '*', '+', '?', ')', '}', exit_char];
+        let total_len: usize = c_vec.len();
         let mut token_vec: Vec<Token> = Vec::new();
         let mut next_char: char = c_vec[index];
+        let mut literal_buffer: Vec<char> = Vec::new();
+        let mut choice_indices: Vec<usize> = vec![0];
 
         while next_char != exit_char {
             match next_char {
-                '[' => {
-                    let result_pair: (Token, usize) = self.parse_choice(c_vec, index)?;
-                    token_vec.push(result_pair.0);
-                    index = result_pair.1;
+                // handles choices - produces a list containing the indices of the starting position of all choices for later splitting
+                '|' => {
+                    let next_index: usize = token_vec.len();
+                    if token_vec.is_empty() || (choice_indices.last().unwrap() == &next_index) {
+                        return Err(format!("Error: Received invalid choice at index {} - choices must split input", index));
+                    }
+                    choice_indices.push(next_index);
                 }
+                // handles sequences
                 '(' => {
-                    let result_pair: (Token, usize) = self.parse_literal(c_vec, index)?;
+                    let result_pair: (Token, usize) = self.parse_chars(c_vec, ')', index + 1)?;
                     token_vec.push(result_pair.0);
                     index = result_pair.1;
                 }
+                // handles repetitions
                 '{' | '*' | '+' | '?' => {
                     if token_vec.is_empty() {
-                        return Err(format!("Invalid bracketing at index {} - cannot repeat empty statement", index));
+                        return Err(format!("Error: Received invalid repetition configuration at index {} - cannot repeat empty statement", index));
                     }
                     let repeated_token: Token = token_vec.pop().unwrap();
                     let result_pair: (Token, usize) = self.parse_repetition(repeated_token, c_vec, index)?;
                     token_vec.push(result_pair.0);
                     index = result_pair.1;
                 }
+                // handles invalid bracketing - valid bracketing handled at the start of the loop
                 ']' | ')' | '}' => {
-                    return Err(format!("Invalid bracketing configuration at index {} - recieved unmatched {}", index, next_char));
+                    return Err(format!("Error: Received invalid bracketing configuration at index {} - received unmatched {}", index, next_char));
                 }
                 _ => {
-                    token_vec.push(Token::Literal(next_char.to_string()));
+                    literal_buffer.push(next_char);
                 }
             }
-            if !c_vec.is_empty() {
-                index += 1;
+            index += 1;
+            let exceeded_length: bool = index >= total_len;
+
+            if !exceeded_length {
                 next_char = c_vec[index];
             }
-            else if exit_char != '\0' {
-                return Err(format!("Failed to find expected exit char ('{}')", exit_char));
+            // produces a literal if the next character would not continue the literal
+            // positioning here ensures that this always executes before exiting
+            if (special_chars.contains(&next_char) || exceeded_length) && !literal_buffer.is_empty() {
+                let result_pair: (Token, usize) = self.parse_literal(literal_buffer, index)?;
+                literal_buffer = Vec::new();
+                token_vec.push(result_pair.0);
             }
-            else {
-                break;
+
+            if exceeded_length {
+                if exit_char != '\0' {
+                    return Err(format!("Error: Failed to find expected exit char ('{}') in sequence", exit_char));
+                }
+                else {
+                    break;
+                }
             }
         }
 
-        return Ok((token_vec, index));
+        // if this sequence contains a choice, then the entire block is a choice
+        if choice_indices.len() > 1 {
+            let mut first: usize;
+            let mut last: usize = token_vec.len();
+            let mut choice_vec: Vec<Token> = Vec::new();
+
+            // iterates through contained tokens and produces a single token for each choice
+            for n in (0..choice_indices.len()).rev() {
+                first = choice_indices[n];
+
+                let mut token_slice: Vec<Token> = token_vec.drain(first..last).collect();
+                choice_vec.push(match token_slice.len() {
+                    1 => token_slice.pop().unwrap(),
+                    _ => Token::Sequence(token_slice),
+                });
+
+                last = first;
+            }
+            choice_vec.reverse();
+
+            return Ok((Token::Choice(choice_vec), index));
+        }
+
+        return Ok((Token::Sequence(token_vec), index));
     }
 
     /// * produces a `Range<usize>` from a discrete repetition (bounded by {}, like {4,12})
     /// * returns this range alongside the number of characters used in the repetition
-    fn parse_ranged_repetition(&self, c_vec: &Vec<char>, mut index: usize) -> Result<(Range<usize>, usize), String> {
-        let mut string_ranges: (String, String) = ("-".to_string(), "-".to_string());
-        let accepted_chars: Vec<char> = vec!['0', '1', '2', '3', '4', '5', '6', '7', '8', '9'];
-        let mut modify_first: bool = true;
-        let mut next_char: char = c_vec[index];
-        let mut char_range: Vec<char> = Vec::new();
-        let start_index: usize = index.clone();
+    fn parse_ranged_repetition(&mut self, c_vec: &Vec<char>, mut index: usize) -> Result<((Bound, Bound), usize), String> {
+        let end_index: usize;
+        let retrieved_end_index: Option<usize> = c_vec.iter().enumerate().skip(index + 1).find(| &(i, &c) | c == '}').map(|(i, _)| i);
+        match retrieved_end_index {
+            None => return Err(format!("Error: Failed to find end of repetition starting at index {}", index)),
+            Some(found_index) => end_index = found_index,
+        }
+        let extracted_range: String = c_vec[index..end_index].to_vec().into_iter().collect();
 
-        while next_char != '}' {
-            if next_char == ',' && modify_first {
-                modify_first = false;
-                string_ranges.0 = char_range.into_iter().collect();
-                char_range = Vec::new();
+        let mut split_range = extracted_range.split(',');
+        let first: String;
+        let last: String;
+        match extracted_range.contains(',') {
+            true => {
+                first = split_range.next().unwrap().to_string();
+                last = split_range.next().unwrap().to_string();
             }
-            else if accepted_chars.contains(&next_char) {
-                char_range.push(next_char);
+            false => return Err(format!("Error: Failed to find range split in repetition starting at index {}", index)),
+        }
+
+        let lower_bound: Bound = if first.is_empty() {
+            Bound::Literal(0)
+        }
+        else {
+            self.parse_arithmetic_expression(&first)?
+        };
+
+        let upper_bound: Bound = if last.is_empty() {
+            Bound::Literal(REPEAT_LIMIT)
+        }
+        else {
+            self.parse_arithmetic_expression(&last)?
+        };
+
+        return Ok(((lower_bound, upper_bound), end_index));
+    }
+
+    /// helper method for parse_arithmetic_expression - creates a Bound::Calculation from a string containing an operation
+    fn get_calculation(&mut self, expression: &String, split_index: usize, operation_type: Operation) -> Result<Bound, String> {
+        let (first, remainder) = expression.split_at(split_index);
+        let last = &remainder[1..];
+
+        return Ok(Bound::Calculation(
+            Box::new(self.parse_arithmetic_expression(&first.to_string())?),
+            operation_type,
+            Box::new(self.parse_arithmetic_expression(&last.to_string())?)
+        ))
+    }
+
+    // left to right, multiplication then add/subtract
+    fn parse_arithmetic_expression(&mut self, expression: &String) -> Result<Bound, String> {
+        if expression.is_empty() {
+            return Err("Error: Range expression is invalid - operators must have two arguments".to_string());
+        }
+
+        let mult_location: usize = expression.find("*").unwrap_or_else(|| usize::MAX);
+        let add_location: usize = expression.find("+").unwrap_or_else(|| usize::MAX);
+        let sub_location: usize = expression.find("-").unwrap_or_else(|| usize::MAX);
+
+        // handles operations
+        if mult_location != usize::MAX {
+            return self.get_calculation(expression, mult_location, Operation::Multiply)
+        }
+        else if add_location != usize::MAX || sub_location != usize::MAX {
+            if sub_location <= add_location {
+                return self.get_calculation(expression, sub_location, Operation::Subtract);
             }
             else {
-                return Err(format!("Repetition parser received invalid character ('{}') at index {}, aborting parsing", next_char, index));
+                return self.get_calculation(expression, add_location, Operation::Add);
             }
-
-            index += 1;
-            next_char = c_vec[index];
         }
-
-        let (start, end) = (string_ranges.0.parse::<usize>().unwrap(), string_ranges.1.parse::<usize>().unwrap());
-        if start > end {
-            return Err(format!("Received invalid range ({} > {}) from indices {} to {}, aborting parsing", start, end, start_index, index));
+        
+        // handles variables
+        if expression.len() == 1 {
+            let first_char = expression.chars().nth(0).unwrap();
+            if first_char >= 'a' && first_char <= 'z' {
+                let char_string: String = first_char.to_string();
+                self.context.insert(char_string.clone(), 0);
+                return Ok(Bound::Variable(char_string));
+            }
         }
-
-        return Ok((start.min(REPEAT_LIMIT)..end.min(REPEAT_LIMIT), index))
+        // handles literals
+        let parsed_literal = expression.parse::<usize>();
+        return match parsed_literal {
+            Ok(literal) => Ok(Bound::Literal(literal)),
+            Err(_) => Err(format!("Error: Range literal ('{}') could not be parsed", expression)),
+        }
     }
 
     /// * produces a `Token::Repetition` from a generic repetition (either special chars (*, +, ?), or a discrete repetition bounded by {})
     /// * processes a given `Vec<char>` to construct this repetition, removing used characters
-    fn parse_repetition<'a>(&self, token: Token, c_vec: &Vec<char>, mut index: usize) -> Result<(Token, usize), String> {
-        let custom_range: Range<usize>;
+    fn parse_repetition(&mut self, token: Token, c_vec: &Vec<char>, mut index: usize) -> Result<(Token, usize), String> {
         let first_char: char = c_vec[index];
         index += 1;
 
         // separates discrete repetitions from symbol-based repetitions
-        let range: Range<usize> = match first_char {
+        let custom_range: (Bound, Bound);
+        let range: (Bound, Bound) = match first_char {
             '{' => {
                 (custom_range, index) = self.parse_ranged_repetition(c_vec, index)?;
                 custom_range
             },
-            '*' => 0..REPEAT_LIMIT,
-            '+' => 1..REPEAT_LIMIT,
-            '?' => 0..1,
-            _ => return Err(format!("Unexpected repetition start char reached ('{}') at index {}", first_char, index)),
+            '*' => (Bound::Literal(0), Bound::Literal(REPEAT_LIMIT)),
+            '+' => (Bound::Literal(1), Bound::Literal(REPEAT_LIMIT)),
+            '?' => (Bound::Literal(0), Bound::Literal(1)),
+            _ => return Err(format!("Error: Unexpected repetition start char reached ('{}') at index {}", first_char, index)),
         };
         // removes processed characters from the char vector, returning the unprocessed remainder of the vector
-        return Ok((Token::Repetition(Box::new(token), range), index));
+        return Ok((Token::Repetition(Box::new(token), range.0, range.1), index));
     }
 
     fn format_input_string(&self, c_string: String) -> Vec<char> {
         return c_string.replace(" ", "").replace("  ", "").chars().collect();
     }
+
+    pub fn get_string(token: &Token) -> String {
+        return Self::recur_to_string(&token, 0);
+    }
+
+    fn recur_to_string(token: &Token, indentation: usize) -> String {
+        let indent_spacing: String = " ".repeat(indentation * 2);
+        return match token {
+            Token::Literal(lit_string) => {
+                format!("{}Literal({})", indent_spacing, lit_string)
+            },
+            Token::Choice(choices) => {
+                let choice_strings: Vec<String> = choices.iter().map(| choice| ExpressionParser::recur_to_string(choice, indentation + 1)).collect();
+                format!("{}Choice:\n{}", indent_spacing, choice_strings.join("\n"))
+            },
+            Token::Repetition(inner_token, lower_bound, upper_bound) => {
+                let token_string: String = ExpressionParser::recur_to_string(inner_token.as_ref(), indentation + 1);
+                format!("{}Repeat ({} to {}) times:\n{}", indent_spacing, Bound::get_string(lower_bound), Bound::get_string(upper_bound), token_string)
+            },
+            Token::Sequence(series) => {
+                let sequence_strings: Vec<String> = series.iter().map(| section | ExpressionParser::recur_to_string(section, indentation + 1)).collect();
+                format!("{}Sequence:\n{}", indent_spacing, sequence_strings.join("\n"))
+            },
+            Token::None => {
+                format!("{}None", indent_spacing)
+            },
+        }
+    }
 }
 
+/// 
 struct Expression { 
-    token: Token,
+    c_token: ContextToken,
     min_length: usize,
 }
 
 impl Expression {
-    pub fn from_token(&self, expression_token: Token) -> Expression {
-        let min_gen_length: usize = Self::calculate_min_length(&expression_token);
-        return Expression { token: expression_token, min_length: min_gen_length };
+    pub fn from_token(&self, expression_token: ContextToken) -> Result<Expression, String> {
+        let min_gen_length: usize = self.calculate_min_length(&expression_token.token)?;
+        return Ok(Expression { c_token: expression_token, min_length: min_gen_length });
     }
     pub fn from_string(&self, expression_string: String) -> Result<Expression, String> {
-        let expression_token: Token = ExpressionParser::produce_token(expression_string)?;
-        let min_gen_length: usize = Self::calculate_min_length(&expression_token);
-        return Ok(Expression { token: expression_token, min_length: min_gen_length });
+        let expression_token: ContextToken = ExpressionParser::produce_token(expression_string)?;
+        let min_gen_length: usize = self.calculate_min_length(&expression_token.token)?;
+        return Ok(Expression { c_token: expression_token, min_length: min_gen_length });
     }
 
     pub fn gen_to_length(&self, length: usize) -> Vec<String> {
@@ -236,45 +387,44 @@ impl Expression {
         let mut generated_strings: Vec<String> = Vec::new();
 
         for _ in 0..SAMPLES {
-            let new_string: Option<String> = self.recur_to_length(&self.token, length, SAMPLES);
+            let new_string: Result<String, String> = self.recur_to_length(&self.c_token.token, length, SAMPLES);
             match new_string {
-                Some(string) => generated_strings.push(string),
-                None => {},
+                Ok(string) => generated_strings.push(string),
+                Err(_) => {},
             }
         }
         return generated_strings;
     }
 
-    pub fn recur_to_length(&self, expression_token: &Token, target_length: usize, target_samples: usize) -> Option<String> {
-        let max_length: usize = Self::calculate_max_length(expression_token);
-        let min_length: usize = Self::calculate_min_length(expression_token);
+    pub fn recur_to_length(&self, expression_token: &Token, target_length: usize, target_samples: usize) -> Result<String, String> {
+        let max_length: usize = self.calculate_max_length(expression_token)?;
+        let min_length: usize = self.calculate_min_length(expression_token)?;
 
         // if the max length reachable is below the target, or the min length is above, fail and exit
         if max_length < target_length || min_length > target_length {
-            return None;
+            return Ok("".to_string());
         }
         // if target length has elapsed, exit out successfully
         if target_length == 0 {
-            return Some("".to_string());
+            return Ok("".to_string());
         }
 
         // TODO: finish - implement helper function for random constrained integer composition - for use in distributing length across a sequence
         match expression_token {
             Token::Literal(literal) => {
-                return Some(literal.to_string());
+                return Ok(literal.to_string());
             }
-            Token::Repetition(token, repetitions) => {
-                let remaining_repetitions: Range<usize> = repetitions.clone();
-                return None;
+            Token::Repetition(token, lower_bound, upper_bound) => {
+                return Ok("".to_string());
             }
             Token::Choice(tokens) => {
-                return None;
+                return Ok("".to_string());
             }
             Token::Sequence(tokens) => {
-                return None;
+                return Ok("".to_string());
             }
             Token::None => {
-                return None;
+                return Ok("".to_string());
             }
         }
     }
@@ -317,23 +467,23 @@ impl Expression {
         return Some(lengths);
     }
 
-    fn calculate_min_length(analysed_token: &Token) -> usize {
+    fn calculate_min_length(&self, analysed_token: &Token) -> Result<usize, String> {
         return match analysed_token {
-            Token::Literal(literal) => literal.len(),
-            Token::Repetition(repeated_token, repetitions) => Self::calculate_min_length(repeated_token.as_ref()) * repetitions.start,
-            Token::Choice(token_vec) => token_vec.iter().map(| token | Self::calculate_min_length(token)).min().unwrap_or(0),
-            Token::Sequence(token_vec) => token_vec.iter().map(| token | Self::calculate_min_length(token)).sum(),
-            Token::None => 0,
+            Token::Literal(literal) => Ok(literal.len()),
+            Token::Repetition(repeated_token, lower_bound, _) => Ok(self.calculate_min_length(repeated_token.as_ref())? * Bound::calculate_bound(lower_bound, &self.c_token.context)?),
+            Token::Choice(token_vec) => token_vec.iter().map(| token | self.calculate_min_length(token)).min().unwrap_or(Ok(0)),
+            Token::Sequence(token_vec) => token_vec.iter().map(| token | self.calculate_min_length(token)).sum(),
+            Token::None => Ok(0),
         };
     }
 
-    fn calculate_max_length(analysed_token: &Token) -> usize {
+    fn calculate_max_length(&self, analysed_token: &Token) -> Result<usize, String> {
         return match analysed_token {
-            Token::Literal(literal) => literal.len(),
-            Token::Repetition(repeated_token, repetitions) => Self::calculate_max_length(repeated_token.as_ref()) * repetitions.end,
-            Token::Choice(token_vec) => token_vec.iter().map(| token | Self::calculate_max_length(token)).max().unwrap_or(0),
-            Token::Sequence(token_vec) => token_vec.iter().map(| token | Self::calculate_min_length(token)).sum(),
-            Token::None => 0,
+            Token::Literal(literal) => Ok(literal.len()),
+            Token::Repetition(repeated_token, _, upper_bound) => Ok(self.calculate_max_length(repeated_token.as_ref())? * Bound::calculate_bound(upper_bound, &self.c_token.context)?),
+            Token::Choice(token_vec) => token_vec.iter().map(| token | self.calculate_max_length(token)).max().unwrap_or(Ok(0)),
+            Token::Sequence(token_vec) => token_vec.iter().map(| token | self.calculate_min_length(token)).sum(),
+            Token::None => Ok(0),
         }
     }
 
@@ -347,5 +497,17 @@ impl Expression {
             }
         }
         return sum;
+    }
+}
+
+fn main() {
+    let output_token: Result<ContextToken, String> = ExpressionParser::produce_token("(ab|cd|(e{x*2,}|a{,4})|f){,12}a".to_string());
+    match output_token {
+        Ok(tk) => {
+            println!("{}", ExpressionParser::get_string(&tk.token));
+        }
+        Err(er) => {
+            println!("{}", er);
+        }
     }
 }
