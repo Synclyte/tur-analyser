@@ -1,10 +1,9 @@
 use std::{collections::HashMap, fmt::format, ops::{Index, Range}, usize, vec};
-use rand::Rng;
+use rand::{Rng, rng, seq::IndexedRandom};
 
 const REPEAT_LIMIT: usize = 256;
 
 enum Token {
-    None,
     Literal(String),
     Repetition(Box<Token>, Bound, Bound),
     Choice(Vec<Token>),
@@ -16,6 +15,7 @@ struct ContextToken {
     context: HashMap<String, usize>,
 }
 
+#[derive(Clone)]
 enum Operation {
     Add,
     Subtract,
@@ -23,27 +23,43 @@ enum Operation {
 }
 
 enum Bound {
-    None,
     Literal(usize),
     Variable(String),
     Calculation(Box<Bound>, Operation, Box<Bound>)
 }
 
+impl Clone for Bound {
+    fn clone(&self) -> Self {
+        return match &self {
+            Self::Literal(size) => Self::Literal(size.clone()),
+            Self::Variable(var) => Self::Variable(var.clone()),
+            Self::Calculation(bound_1, operator, bound_2) => Self::Calculation(bound_1.clone(), operator.clone(), bound_2.clone())
+        }
+    }
+}
+
 impl Bound {
-    fn calculate_bound(bound: &Bound, context: &HashMap<String, usize>) -> Result<usize, String> {
+    fn validate_bound(bound: &Bound, context: &HashMap<String, usize>) -> bool {
         return match bound {
-            Bound::Literal(value) => Ok(*value),
-            Bound::Variable(value) => context.get(value).ok_or_else(|| format!("Error: Calculation error - no value provided for variable '{}'", value)).copied(),
+            Bound::Literal(_) => true,
+            Bound::Variable(value) => context.get(value).is_some(),
+            Bound::Calculation(_, _, _) => Bound::calculate_bound(bound, context) >= 0,
+        }
+    }
+
+    fn calculate_bound(bound: &Bound, context: &HashMap<String, usize>) -> usize {
+        return match bound {
+            Bound::Literal(value) => *value,
+            Bound::Variable(value) => *context.get(value).unwrap_or(&0),
             Bound::Calculation(first, operator, last) => {
-                let first_result: usize = Bound::calculate_bound(first.as_ref(), context)?;
-                let last_result: usize = Bound::calculate_bound(last.as_ref(), context)?;
+                let first_result: usize = Bound::calculate_bound(first.as_ref(), context);
+                let last_result: usize = Bound::calculate_bound(last.as_ref(), context);
                 match operator {
-                    Operation::Add => Ok((first_result + last_result).min(REPEAT_LIMIT)),
-                    Operation::Multiply => Ok((first_result * last_result).min(REPEAT_LIMIT)),
-                    Operation::Subtract => first_result.checked_sub(last_result).ok_or_else(|| "Error: Calculation error - bound cannot be below 0".to_string()),
+                    Operation::Add => (first_result + last_result).min(REPEAT_LIMIT),
+                    Operation::Multiply => (first_result * last_result).min(REPEAT_LIMIT),
+                    Operation::Subtract => first_result - last_result,
                 }
             }
-            Bound::None => Err("Error: Calculation error - encountered None type bound during calculation".to_string()),
         } 
     }
 
@@ -59,7 +75,6 @@ impl Bound {
                 };
                 return Bound::get_string(first_expression.as_ref()) + operation_string + &Bound::get_string(last_expression.as_ref());
             }
-            Bound::None => "".to_string(),
         }
     }
 }
@@ -358,9 +373,6 @@ impl ExpressionParser {
                 let sequence_strings: Vec<String> = series.iter().map(| section | ExpressionParser::recur_to_string(section, indentation + 1)).collect();
                 format!("{}Sequence:\n{}", indent_spacing, sequence_strings.join("\n"))
             },
-            Token::None => {
-                format!("{}None", indent_spacing)
-            },
         }
     }
 }
@@ -373,12 +385,12 @@ struct Expression {
 
 impl Expression {
     pub fn from_token(&self, expression_token: ContextToken) -> Result<Expression, String> {
-        let min_gen_length: usize = self.calculate_min_length(&expression_token.token)?;
+        let min_gen_length: usize = self.calculate_min_length(&expression_token.token);
         return Ok(Expression { c_token: expression_token, min_length: min_gen_length });
     }
     pub fn from_string(&self, expression_string: String) -> Result<Expression, String> {
         let expression_token: ContextToken = ExpressionParser::produce_token(expression_string)?;
-        let min_gen_length: usize = self.calculate_min_length(&expression_token.token)?;
+        let min_gen_length: usize = self.calculate_min_length(&expression_token.token);
         return Ok(Expression { c_token: expression_token, min_length: min_gen_length });
     }
 
@@ -387,7 +399,7 @@ impl Expression {
         let mut generated_strings: Vec<String> = Vec::new();
 
         for _ in 0..SAMPLES {
-            let new_string: Result<String, String> = self.recur_to_length(&self.c_token.token, length, SAMPLES);
+            let new_string: Result<String, String> = self.recur_to_length(&self.c_token.token, length);
             match new_string {
                 Ok(string) => generated_strings.push(string),
                 Err(_) => {},
@@ -396,60 +408,145 @@ impl Expression {
         return generated_strings;
     }
 
-    pub fn recur_to_length(&self, expression_token: &Token, target_length: usize, target_samples: usize) -> Result<String, String> {
-        let max_length: usize = self.calculate_max_length(expression_token)?;
-        let min_length: usize = self.calculate_min_length(expression_token)?;
+    pub fn recur_to_length(&self, expression_token: &Token, target_length: usize) -> Result<String, String> {
+        let max_length: usize = self.calculate_max_length(expression_token);
+        let min_length: usize = self.calculate_min_length(expression_token);
 
         // if the max length reachable is below the target, or the min length is above, fail and exit
         if max_length < target_length || min_length > target_length {
-            return Ok("".to_string());
+            return Err("Impossible to reach target from current state".to_string());
         }
         // if target length has elapsed, exit out successfully
         if target_length == 0 {
             return Ok("".to_string());
         }
 
-        // TODO: finish - implement helper function for random constrained integer composition - for use in distributing length across a sequence
         match expression_token {
             Token::Literal(literal) => {
                 return Ok(literal.to_string());
             }
             Token::Repetition(token, lower_bound, upper_bound) => {
-                return Ok("".to_string());
+                let context: &HashMap<String, usize> = &self.c_token.context;
+
+                let inner_token: &Token = token.as_ref();
+                let lower: usize = Bound::calculate_bound(lower_bound, context);
+                let upper: usize = Bound::calculate_bound(upper_bound, context);
+                let inner_min: usize = Expression::calculate_min_length(&self, inner_token);
+                let inner_max: usize = Expression::calculate_max_length(&self, inner_token);
+
+                let mut bound_targets: Vec<Vec<usize>> = Vec::new();
+                let mut min_vec: Vec<usize> = vec![inner_min; lower];
+                let mut max_vec: Vec<usize> = vec![inner_max; lower];
+                // this may cause issues with length 0 subtokens - these should be optimised out by setting this lower bound to 0 and removing the length 0 subtoken
+                // generates lists of possible partitions
+                for _ in lower..upper {
+                    let targets = Expression::produce_partitions(&min_vec, &max_vec, target_length);
+                    if targets.is_ok() {
+                        bound_targets.push(targets.unwrap());
+                    }
+                    else {
+                        break;
+                    }
+                    min_vec.push(inner_min);
+                    max_vec.push(inner_max);
+                }
+
+                // uses built lists of possible partitions to attempt to produce strings
+                for i in 0..bound_targets.len() {
+                    let next_string: Result<Vec<String>, String> = bound_targets[i].iter().map(| target | self.recur_to_length(inner_token, *target)).collect();
+                    if next_string.is_ok() {
+                        return Ok(next_string.unwrap().join(""));
+                    }
+                }
+                return Err("Could not find valid string configuration for repetition".to_string());
             }
             Token::Choice(tokens) => {
-                return Ok("".to_string());
+                let acceptable_tokens: Vec<&Token> = tokens.iter()
+                    .filter(| token | self.calculate_max_length(token) >= target_length && self.calculate_min_length(token) <= target_length)
+                    .collect();
+
+                return match acceptable_tokens.choose(&mut rng()) {
+                    Some(token) => self.recur_to_length(*token, target_length),
+                    None => Err("Error: Failed to find valid choice for choice token in string generation".to_string()),
+                }
             }
             Token::Sequence(tokens) => {
-                return Ok("".to_string());
-            }
-            Token::None => {
-                return Ok("".to_string());
+                let component_min_lengths: Vec<usize> = tokens.iter().map(| token | self.calculate_min_length(token)).collect();
+                let component_max_lengths: Vec<usize> = tokens.iter().map(| token | self.calculate_max_length(token)).collect();
+
+                let partition_targets: Vec<usize> = Expression::produce_partitions( &component_min_lengths, &component_max_lengths, target_length)?;
+                return Ok(tokens.iter().zip(partition_targets.iter())
+                    .map(| (token, length) | self.recur_to_length(token, *length))
+                    .collect::<Result<Vec<String>, String>>()?
+                    .join(""));
             }
         }
     }
 
-    pub fn gen_samples(&self, samples: usize) -> Vec<String> {
-        return vec![];
+    // calculates the minimum bound of a full `Token` object
+    fn calculate_min_bound(&self, token: &Token) -> Bound {
+        return match token {
+            Token::Literal(lit) => Bound::Literal(lit.len()),
+            // repetitions are calculated by multiplying the min bound of a token by its min length, resulting in the min total
+            Token::Repetition(inner_token, lower, _) => Bound::Calculation(Box::new(Expression::calculate_min_bound(&self, inner_token.as_ref())), Operation::Multiply, Box::new(lower.clone())),
+            // choices are calculated through finding the min bound for the shortest possible choice token
+            Token::Choice(choices) => Expression::calculate_min_bound(&self, choices.iter()
+                .min_by_key(| choice | Expression::calculate_min_length(&self, *choice))
+                .unwrap_or(&Token::Literal("".to_string()))),
+            // sequences are calculated through producing the sum of the min bound of all sequence tokens
+            Token::Sequence(sequence) => match sequence.len() {
+                0 => Bound::Literal(0),
+                1 => self.calculate_min_bound(sequence.first().unwrap()),
+                _ => {
+                    let mut result: Bound = Bound::Literal(0);
+                    for i in 0..sequence.len() {
+                        result = Bound::Calculation(Box::new(result), Operation::Add, Box::new(self.calculate_min_bound(sequence.get(i).unwrap())));
+                    }
+                    result
+                }
+            }
+        }
+    }
+
+    // operates the same as min bound, but with some functions flipped to instead calculate the max bound
+    fn calculate_max_bound(&self, token: &Token) -> Bound {
+        return match token {
+            Token::Literal(lit) => Bound::Literal(lit.len()),
+            Token::Repetition(inner_token, _, upper) => Bound::Calculation(Box::new(Expression::calculate_max_bound(&self, inner_token.as_ref())), Operation::Multiply, Box::new(upper.clone())),
+            Token::Choice(choices) => Expression::calculate_max_bound(&self, choices.iter()
+                .max_by_key(| choice | Expression::calculate_max_length(&self, *choice))
+                .unwrap_or(&Token::Literal("".to_string()))),
+            Token::Sequence(sequence) => match sequence.len() {
+                0 => Bound::Literal(0),
+                1 => self.calculate_max_bound(sequence.first().unwrap()),
+                _ => {
+                    let mut result: Bound = Bound::Literal(0);
+                    for i in 0..sequence.len() {
+                        result = Bound::Calculation(Box::new(result), Operation::Add, Box::new(self.calculate_max_bound(sequence.get(i).unwrap())));
+                    }
+                    result
+                }
+            }
+        }        
     }
 
     // biased simple partition producer
-    fn produce_partitions(random: &mut impl Rng, lower: &[usize], upper: &[usize], target_length: usize) -> Option<Vec<usize>> {
+    fn produce_partitions(lower: &[usize], upper: &[usize], target_length: usize) -> Result<Vec<usize>, String> {
         let min_lower: usize = lower.iter().sum();
         let max_upper: usize = upper.iter().sum();
         let partitions: usize = lower.len();
         let mut lengths: Vec<usize> = Vec::with_capacity(partitions);
 
         if target_length < min_lower || target_length > max_upper {
-            return None;
+            return Err("Target lengths are invalid for partitioning".to_string());
         }
 
         let mut remaining_allocation: usize = target_length - min_lower;
         // implements random bounded composition to find valid random allocations of size to each partition
         for i in 0..partitions {
-            let lower_partiton: usize = lower[i];
+            let lower_partition: usize = lower[i];
             let upper_partition: usize = upper[i];
-            let max_allocation: usize = upper_partition - lower_partiton;
+            let max_allocation: usize = upper_partition - lower_partition;
             let allocation: usize;
 
             // if this is the final allocation, allocate the remainder of length to this partition
@@ -458,32 +555,30 @@ impl Expression {
             }
             // otherwise, allocate a random amount of length between 0 and the remaining allocation/max allocation to it
             else {
-                allocation = random.random_range(0..=remaining_allocation.min(max_allocation));
+                allocation = rand::rng().random_range(0..=remaining_allocation.min(max_allocation));
             }
-            lengths.push(lower_partiton + allocation);
+            lengths.push(lower_partition + allocation);
             remaining_allocation -= allocation;
         }
 
-        return Some(lengths);
+        return Ok(lengths);
     }
 
-    fn calculate_min_length(&self, analysed_token: &Token) -> Result<usize, String> {
+    fn calculate_min_length(&self, analysed_token: &Token) -> usize {
         return match analysed_token {
-            Token::Literal(literal) => Ok(literal.len()),
-            Token::Repetition(repeated_token, lower_bound, _) => Ok(self.calculate_min_length(repeated_token.as_ref())? * Bound::calculate_bound(lower_bound, &self.c_token.context)?),
-            Token::Choice(token_vec) => token_vec.iter().map(| token | self.calculate_min_length(token)).min().unwrap_or(Ok(0)),
+            Token::Literal(literal) => literal.len(),
+            Token::Repetition(repeated_token, lower_bound, _) => self.calculate_min_length(repeated_token.as_ref()) * Bound::calculate_bound(lower_bound, &self.c_token.context),
+            Token::Choice(token_vec) => token_vec.iter().map(| token | self.calculate_min_length(token)).min().unwrap_or(0),
             Token::Sequence(token_vec) => token_vec.iter().map(| token | self.calculate_min_length(token)).sum(),
-            Token::None => Ok(0),
         };
     }
 
-    fn calculate_max_length(&self, analysed_token: &Token) -> Result<usize, String> {
+    fn calculate_max_length(&self, analysed_token: &Token) -> usize {
         return match analysed_token {
-            Token::Literal(literal) => Ok(literal.len()),
-            Token::Repetition(repeated_token, _, upper_bound) => Ok(self.calculate_max_length(repeated_token.as_ref())? * Bound::calculate_bound(upper_bound, &self.c_token.context)?),
-            Token::Choice(token_vec) => token_vec.iter().map(| token | self.calculate_max_length(token)).max().unwrap_or(Ok(0)),
+            Token::Literal(literal) => literal.len(),
+            Token::Repetition(repeated_token, _, upper_bound) => self.calculate_max_length(repeated_token.as_ref()) * Bound::calculate_bound(upper_bound, &self.c_token.context),
+            Token::Choice(token_vec) => token_vec.iter().map(| token | self.calculate_max_length(token)).max().unwrap_or(0),
             Token::Sequence(token_vec) => token_vec.iter().map(| token | self.calculate_min_length(token)).sum(),
-            Token::None => Ok(0),
         }
     }
 
