@@ -946,5 +946,8 @@ mod tests {
         }
     }
 
-    mod 
+    mod general_parser {
+        use super::*;
+
+    }
 }
