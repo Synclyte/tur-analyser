@@ -1,12 +1,13 @@
-use core::num;
-use std::{any::Any, cmp::Ordering, collections::HashMap, fmt::format, ops::{Index, Range, RangeInclusive}, usize, vec};
-use rand::{Rng, rng, seq::IndexedRandom};
+use std::{collections::{HashMap, HashSet}, usize, vec, ops::Range};
+use rand::{Rng, rng, rngs::ThreadRng, seq::IndexedRandom};
 
 const REPEAT_LIMIT: i32 = 256;
 
 // token struct for representing regular expressions
 // covers all basic regex operations 
 // essentially an AST for expanded regex
+
+#[derive(PartialEq)]
 enum Token {
     Literal(String),
     Repetition(Box<Token>, Bound, Bound),
@@ -18,8 +19,7 @@ enum Token {
 enum CalcToken {
     Literal((i32, i8)),
     Variable((String, i8)),
-    Operation((Operation, i8)),
-    None
+    Operation((Operation, i8))
 }
 
 enum CalcTokenType {
@@ -37,7 +37,7 @@ struct ContextToken {
 }
 
 // mathematical operations - used for calculating discrete repetition `Bound` values
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 enum Operation {
     Add,
     Subtract,
@@ -64,6 +64,7 @@ impl Operation {
 }
 
 // calculation tree - provides a means to calculate the value of a given mathematical expression
+#[derive(PartialEq)]
 enum Bound {
     Literal(i32),
     Variable(String),
@@ -82,25 +83,22 @@ impl Clone for Bound {
 }
 
 impl Bound {
-    fn validate_bound(bound: &Bound, context: &HashMap<String, i32>) -> bool {
-        return match bound {
-            Bound::Literal(_) => true,
-            Bound::Variable(value) => context.get(value).is_some(),
-            Bound::Calculation(_, _, _) => Bound::calculate_bound(bound, context).is_some()
+    fn has_variable(&self, target_name: &str) -> bool {
+        match self {
+            Bound::Variable(var_name) => var_name == target_name,
+            Bound::Calculation(left, _, right) => left.has_variable(target_name) | right.has_variable(target_name),
+            _ => false,
         }
     }
 
-    fn calculate_bound(bound: &Bound, context: &HashMap<String, i32>) -> Option<usize> {
-        let result: i32 = Bound::calculate_bound_components(bound, context).min(REPEAT_LIMIT);
-        if result >= 0 {
-            return Some(result as usize);
-        }
-        return None;
+    fn calculate_bound(&self, context: &HashMap<String, i32>) -> Option<i32> {
+        let result = self.calculate_bound_components(context).min(REPEAT_LIMIT);
+        return Some(result);
     }
 
     // recursively calculates a bound using dfs
-    fn calculate_bound_components(bound: &Bound, context: &HashMap<String, i32>) -> i32 {
-        return match bound {
+    fn calculate_bound_components(&self, context: &HashMap<String, i32>) -> i32 {
+        return match self {
             Bound::Literal(value) => *value,
             Bound::Variable(value) => *context.get(value).unwrap_or(&0i32),
             Bound::Calculation(first, operator, last) => {
@@ -115,8 +113,8 @@ impl Bound {
         };
     }
 
-    fn get_string(bound: &Bound) -> String {
-        return match bound {
+    fn get_string(&self) -> String {
+        return match self {
             Bound::Literal(lit) => lit.to_string(),
             Bound::Variable(var) => var.to_string(),
             Bound::Calculation(first_expression, operation, last_expression) => {
@@ -129,6 +127,17 @@ impl Bound {
             }
         }
     }
+}
+
+#[derive(Clone)]
+struct Constraint {
+    min: Bound,
+    max: Bound
+}
+
+struct DependencyGraph {
+    order: Vec<String>,
+    constraints: Vec<Constraint>
 }
 
 /// a structure designed to take a `String` and convert it into a regex-like `Expression` to generate inputs for machines
@@ -156,9 +165,9 @@ impl ExpressionParser {
     }
 
     /// takes a string as input, and returns either the resulting tokenised regular expression, or a string-based error. main function of ExpressionParser
-    pub fn produce_token(expression: String) -> Result<ContextToken, String> {
+    pub fn produce_token(expression: &str) -> Result<ContextToken, String> {
         let mut parser: ExpressionParser = ExpressionParser::new();
-        let mut cleaned_vector_expression: Vec<char> = Self::format_input_string(&parser, expression);
+        let mut cleaned_vector_expression: Vec<char> = expression.chars().filter(|c| !c.is_whitespace()).collect();
         let output_token: Token = Self::parse_chars(&mut parser, &mut cleaned_vector_expression, '\0', 0)?.0;
 
         return Ok(ContextToken{token: output_token, context: parser.context});
@@ -277,6 +286,10 @@ impl ExpressionParser {
             return Ok((Token::Choice(choice_vec), index));
         }
 
+        if token_vec.len() == 1 {
+            return Ok((token_vec.pop().unwrap(), index));
+        }
+
         return Ok((Token::Sequence(token_vec), index));
     }
 
@@ -306,10 +319,14 @@ impl ExpressionParser {
 
             return Ok(((lower_bound, upper_bound), end_index));
         }
-        return Err(format!("Could not find delimiter in range '{}'", extracted_range));
+        else {
+            let single_bound: Bound = self.get_bound_from_string(&extracted_range, 0)?;
+
+            return Ok(((single_bound.clone(), single_bound), end_index));
+        }
     }
 
-    fn get_bound_from_string(&self, string: &String, default_size: i32) -> Result<Bound, String> {
+    fn get_bound_from_string(&mut self, string: &String, default_size: i32) -> Result<Bound, String> {
         if string.is_empty() {
             return Ok(Bound::Literal(default_size));
         }
@@ -386,7 +403,7 @@ impl ExpressionParser {
         collected_string
     }
 
-    fn get_token_tree(&self, tokens: &[CalcToken]) -> Result<Bound, String> {
+    fn get_token_tree(&mut self, tokens: &[CalcToken]) -> Result<Bound, String> {
         if tokens.is_empty() {
             return Err("Malformed token array given - array has length 0".into());
         }
@@ -405,8 +422,10 @@ impl ExpressionParser {
                 Ok(Bound::Calculation(Box::new(left), op.clone(), Box::new(right)))
             }
             CalcToken::Literal((val, _)) => Ok(Bound::Literal(*val)),
-            CalcToken::Variable((var, _)) => Ok(Bound::Variable(var.clone())),
-            CalcToken::None => unreachable!()
+            CalcToken::Variable((var, _)) => {
+                self.context.insert(var.clone(), 0);
+                Ok(Bound::Variable(var.clone()))
+            }
         }
     }
 
@@ -475,13 +494,12 @@ impl ExpressionParser {
     /// * processes a given `Vec<char>` to construct this repetition, removing used characters
     fn parse_repetition(&mut self, token: Token, c_vec: &Vec<char>, mut index: usize) -> Result<(Token, usize), String> {
         let first_char: char = c_vec[index];
-        index += 1;
 
         // separates discrete repetitions from symbol-based repetitions
         let custom_range: (Bound, Bound);
         let range: (Bound, Bound) = match first_char {
             '{' => {
-                (custom_range, index) = self.parse_ranged_repetition(c_vec, index)?;
+                (custom_range, index) = self.parse_ranged_repetition(c_vec, index + 1)?;
                 custom_range
             },
             '*' => (Bound::Literal(0), Bound::Literal(REPEAT_LIMIT)),
@@ -495,7 +513,9 @@ impl ExpressionParser {
     }
 
     fn format_input_string(&self, c_string: String) -> Vec<char> {
-        return c_string.replace(" ", "").replace("  ", "").chars().collect();
+        return c_string.chars()
+            .filter(|c| !c.is_whitespace())
+            .collect();
     }
 
     pub fn get_string(token: &Token) -> String {
@@ -525,18 +545,263 @@ impl ExpressionParser {
     }
 }
 
-/// 
+impl ContextToken {
+    /// potential solutions:
+    ///     annealing - simplified GE which probabilistically finds a global maximum using a gradient descent-like algorithmic search with mutations
+    ///     pros - simpler, performant way to estimate a solution
+    ///     cons - may struggle with complex cases with many variables
+    /// 
+    ///     genetic algorithm - genetic search using variables as genes, maintaining a population over generations and gradually getting closer to a correct result
+    ///     pros - much more likely to find a correct answer, especially in complex cases with many variables. can also find many solutions simultaneously
+    ///     cons - much slower - may still struggle with complex cases with strangely shaped search spaces
+    /// 
+    /// both will require some methodology to enforce variable constraints - can be added to fitness function of a GE
+    /// constraints should be handled using a dependency graph, such that constraints are enforcable
+    /// 
+    ///     after this, the variables generated can be fed into another search algorithm to find a valid string based on literal-based ranges
+    /// 
+    ///     https://en.wikipedia.org/wiki/Simulated_annealing
+    ///     https://en.wikipedia.org/wiki/Genetic_algorithm
+    ///     https://en.wikipedia.org/wiki/Dependency_graph
+    ///     https://en.wikipedia.org/wiki/Topological_sorting#Kahn's_algorithm
+    /// 
+    /// end solution also needs a way to generate strings from these chosen variables
+    /// this could use a greedy generator with a budget of n (where n is the target length)
+    /// picking an option reduces the budget recursively until no more options are availible
+    /// could alternatively use a more intelligent algorithm to ensure a solution will always be found if it exists 
+
+    pub fn generate_to_length(&self, search_range: Range<usize>) -> Vec<String> {
+        let mut generated_strings: Vec<String> = Vec::new();
+        let mut lengths_generated: HashSet<usize> = HashSet::new();
+
+        // used to ensure that repairs to parameters are done in the correct order such that
+        // they will always generate a non-contradicting set of output variables  
+        let dependency_graph = self.get_dependency_graph();
+
+        for target_length in search_range.clone() {
+            self.get_valid_variables(target_length, &dependency_graph);
+            let generated_string = self.generate_string(target_length);
+            let generated_length = generated_string.len();
+
+            if !lengths_generated.contains(&generated_length) && search_range.contains(&generated_length) {
+                generated_strings.push(generated_string);
+                lengths_generated.insert(generated_length);
+            }
+        }
+        generated_strings.sort_by_key(|s| s.len());
+
+        return generated_strings;
+    }
+
+    fn generate_string(&self, target_length: usize) -> String {
+        return String::new();
+        // TODO: finish
+    }
+
+    /// uses an annealing-based approach to find valid variables based on constraints
+    fn get_valid_variables(&self, target_length: usize, dependency_graph: &DependencyGraph) -> HashMap<String, i32> {
+        // for random mutations
+        let mut rng = rand::rng();
+        let mut var_state = self.context.clone();
+        Self::enforce_constraints(&mut var_state, &dependency_graph);
+
+        let mut best_length = self.calculate_max_length(&self.token, &var_state);
+        let mut best_vars = var_state.clone();
+        let mut best_diff = target_length.abs_diff(best_length);
+
+        let max_iterations = 500;
+        let init_temp = target_length as f64;
+
+        for i in 0..max_iterations {
+            if best_diff == 0 {
+                return best_vars;
+            }
+
+            let temp = init_temp * (1f64 - i as f64 / max_iterations as f64);
+            let mut mutated_vars = var_state.clone();
+            self.mutate_variable(&mut mutated_vars, &dependency_graph.order, &mut rng);
+            Self::enforce_constraints(&mut mutated_vars, &dependency_graph);
+        }
+        // TODO: finish
+        return HashMap::new();
+    }
+
+    fn calculate_max_length(&self, analysed_token: &Token, context: &HashMap<String, i32>) -> usize {
+        return match analysed_token {
+            Token::Literal(literal) => literal.len(),
+            Token::Repetition(repeated_token, _, upper_bound) => self.calculate_max_length(repeated_token.as_ref(), &context) * Bound::calculate_bound(upper_bound, &self.context).unwrap_or(0) as usize,
+            Token::Choice(token_vec) => token_vec.iter().map(| token | self.calculate_max_length(token, &context)).max().unwrap_or(0),
+            Token::Sequence(token_vec) => token_vec.iter().map(| token | self.calculate_max_length(token, &context)).sum(),
+        }
+    }
+
+    fn calculate_max_bound(&self, token: &Token, context: &HashMap<String, i32>) -> Bound {
+        return match token {
+            Token::Literal(lit) => Bound::Literal(lit.len() as i32),
+            Token::Repetition(inner_token, _, upper) => Bound::Calculation(Box::new(self.calculate_max_bound(inner_token.as_ref(), &context)), Operation::Multiply, Box::new(upper.clone())),
+            Token::Choice(choices) => self.calculate_max_bound(choices.iter()
+                .max_by_key(| choice | self.calculate_max_length(*choice, &context))
+                .unwrap_or(&Token::Literal("".to_string())), &context),
+            Token::Sequence(sequence) => match sequence.len() {
+                0 => Bound::Literal(0),
+                1 => self.calculate_max_bound(sequence.first().unwrap(), &context),
+                _ => {
+                    let mut result: Bound = Bound::Literal(0);
+                    for i in 0..sequence.len() {
+                        result = Bound::Calculation(Box::new(result), Operation::Add, Box::new(self.calculate_max_bound(sequence.get(i).unwrap(), &context)));
+                    }
+                    result
+                }
+            }
+        }        
+    }
+
+    /// implementation of Kahn's algorithm (topological sorting) https://en.wikipedia.org/wiki/Topological_sorting#Kahn's_algorithm
+    /// essentially just a rust translation of the wikipedia page pseudocode
+    fn get_dependency_graph(&self) -> DependencyGraph {
+        let mut adjacency_graph: HashMap<String, HashSet<String>> = HashMap::new();
+        let mut constraints: Vec<Constraint> = Vec::new();
+        
+        Self::get_constraints(&self.token, &mut constraints, &mut adjacency_graph);
+        let mut elements: HashSet<String> = HashSet::new();
+        let mut vert_degrees: HashMap<String, u16> = HashMap::new();
+
+        // preprocessing for Kahn's algorithm - building data structures
+        for (key_var, proximity) in &adjacency_graph {
+            elements.insert(key_var.clone());
+            for var in proximity {
+                elements.insert(var.clone());
+                *vert_degrees.entry(var.clone()).or_insert(0) += 1;
+            }
+        }
+
+        // produces set of nodes with no incoming edge to be processed. does not technically have to be a queue
+        let mut element_queue: Vec<String> = elements.iter()
+            .filter(|e| *vert_degrees.get(*e).unwrap_or(&0) == 0)
+            .cloned()
+            .collect();
+        element_queue.reverse();
+        let mut order: Vec<String> = Vec::new();
+
+        // iterates through all of the nodes with no incoming edges
+        // for each one, adds it to the `order` and decrements the degrees of all nodes which
+        // this node shares a vertex with, as that vertex is no longer valid
+        // Kahn's algorithm pseudocode - https://en.wikipedia.org/wiki/Topological_sorting#Kahn's_algorithm
+        while let Some(e) = element_queue.pop() {
+            order.push(e.clone());
+            if let Some(adj) = &adjacency_graph.get(&e) {
+                for adj_e in *adj {
+                    let mut degree = *vert_degrees.get(adj_e).unwrap();
+                    degree -= 1;
+                    if degree == 0 {
+                        element_queue.insert(0, adj_e.clone());
+                    }
+                }
+            }
+        }
+
+        // some elements will not work with this, as this algorithm assumes a DAG is input
+        // therefore, for cycles, an arbitrary order must be given
+        for cyclic_element in elements {
+            if !order.contains(&cyclic_element) {
+                order.push(cyclic_element);
+            }
+        }
+        
+        return DependencyGraph { order: order, constraints }
+    }
+
+    /// fixes constraints post-mutation such that all are fulfilled
+    fn enforce_constraints(variables: &mut HashMap<String, i32>, dependency_graph: &DependencyGraph) {
+        // for each variable, ensures that all constraints are fulfilled
+        for var in &dependency_graph.order {
+            let mut var_value: i32 = 0;
+            for constraint in &dependency_graph.constraints {
+                // oversimplification - assumes a max bound is equal to the variable used
+                // should work for simple cases, but complex cases may break this logic
+                if constraint.max.has_variable(var) {
+                    let min_value: i32 = constraint.min.calculate_bound(variables).unwrap_or(0);
+                    var_value = var_value.max(min_value);
+                }
+            }
+
+            let current_var = *variables.get(var).unwrap_or(&0);
+            if current_var < var_value as i32 {
+                variables.insert(var.clone(), var_value);
+            }
+        }
+    }
+
+    fn mutate_variable(&self, variables: &mut HashMap<String, i32>, names: &Vec<String>, rng: &mut impl Rng) {
+        if names.is_empty() {
+            return;
+        }
+
+        // get a random variable to mutate
+        let target_var = names.get(rng.random_range(0..names.len())).unwrap();
+        let target_value = variables.get_mut(target_var).unwrap();
+
+        // apply a random 'mutation', modifying the variable value
+        // this may require later tuning - these values are not well tested
+        *target_value = (*target_value + match rng.random_range(0..100) {
+            0..60 => rng.random_range(-1..=1),
+            60..85 => rng.random_range(-4..=4),
+            _ => rng.random_range(-10..=10),
+        }).max(0);
+    }
+
+    /// recursively gathers constraints relating to the variables within ranges in `Token`s
+    fn get_constraints(token: &Token, constraints: &mut Vec<Constraint>, adjacency_graph: &mut HashMap<String, HashSet<String>>) {
+        return match token {
+            Token::Sequence(t) | Token::Choice(t) => {
+                for token in t { Self::get_constraints(token, constraints, adjacency_graph); }
+            },
+            Token::Repetition(inner_token, min, max) => {
+                constraints.push(Constraint { min: min.clone(), max: max.clone() });
+                // adds the variables of the max range to the adjacency graph of the min range
+                for min_var in Self::get_variables(min) {
+                    for max_var in Self::get_variables(max) {
+                        adjacency_graph.entry(min_var.clone()).or_default().insert(max_var.clone());
+                    }
+                }
+                Self::get_constraints(inner_token, constraints, adjacency_graph);
+            },
+            _ => {}
+        }
+    }
+
+    // recursively extracts variables from a provided bound and adds them to a hashset for use in
+    // the adjacency graph
+    fn get_variables(bound: &Bound) -> HashSet<String> {
+        let mut contained_vars: HashSet<String> = HashSet::new();
+        match bound {
+            Bound::Variable(var) => {
+                contained_vars.insert(var.clone());
+            },
+            Bound::Calculation(left, _, right) => {
+                contained_vars.extend(Self::get_variables(left));
+                contained_vars.extend(Self::get_variables(right));
+            },
+            _ => {}
+        }
+        return contained_vars;
+    }
+}
+
+
 struct Expression { 
     c_token: ContextToken,
     min_length: usize,
 }
 
+// deprecated, ContextToken now used instead to generate strings
 impl Expression {
     pub fn from_token(&self, expression_token: ContextToken) -> Result<Expression, String> {
         let min_gen_length: usize = self.calculate_min_length(&expression_token.token);
         return Ok(Expression { c_token: expression_token, min_length: min_gen_length });
     }
-    pub fn from_string(&self, expression_string: String) -> Result<Expression, String> {
+
+    pub fn from_string(&self, expression_string: &str) -> Result<Expression, String> {
         let expression_token: ContextToken = ExpressionParser::produce_token(expression_string)?;
         let min_gen_length: usize = self.calculate_min_length(&expression_token.token);
         return Ok(Expression { c_token: expression_token, min_length: min_gen_length });
@@ -577,8 +842,8 @@ impl Expression {
                 let context: &HashMap<String, i32> = &self.c_token.context;
 
                 let inner_token: &Token = token.as_ref();
-                let lower: usize = Bound::calculate_bound(lower_bound, context).ok_or("Negative lower bound length".to_string())?;
-                let upper: usize = Bound::calculate_bound(upper_bound, context).ok_or("Negative upper bound length".to_string())?;
+                let lower: usize = Bound::calculate_bound(lower_bound, context).ok_or("Negative lower bound length".to_string())? as usize;
+                let upper: usize = Bound::calculate_bound(upper_bound, context).ok_or("Negative upper bound length".to_string())? as usize;
                 let inner_min: usize = Expression::calculate_min_length(&self, inner_token);
                 let inner_max: usize = Expression::calculate_max_length(&self, inner_token);
 
@@ -715,7 +980,7 @@ impl Expression {
     fn calculate_min_length(&self, analysed_token: &Token) -> usize {
         return match analysed_token {
             Token::Literal(literal) => literal.len(),
-            Token::Repetition(repeated_token, lower_bound, _) => self.calculate_min_length(repeated_token.as_ref()) * Bound::calculate_bound(lower_bound, &self.c_token.context).unwrap_or(0),
+            Token::Repetition(repeated_token, lower_bound, _) => self.calculate_min_length(repeated_token.as_ref()) * Bound::calculate_bound(lower_bound, &self.c_token.context).unwrap_or(0) as usize,
             Token::Choice(token_vec) => token_vec.iter().map(| token | self.calculate_min_length(token)).min().unwrap_or(0),
             Token::Sequence(token_vec) => token_vec.iter().map(| token | self.calculate_min_length(token)).sum(),
         };
@@ -724,7 +989,7 @@ impl Expression {
     fn calculate_max_length(&self, analysed_token: &Token) -> usize {
         return match analysed_token {
             Token::Literal(literal) => literal.len(),
-            Token::Repetition(repeated_token, _, upper_bound) => self.calculate_max_length(repeated_token.as_ref()) * Bound::calculate_bound(upper_bound, &self.c_token.context).unwrap_or(0),
+            Token::Repetition(repeated_token, _, upper_bound) => self.calculate_max_length(repeated_token.as_ref()) * Bound::calculate_bound(upper_bound, &self.c_token.context).unwrap_or(0) as usize,
             Token::Choice(token_vec) => token_vec.iter().map(| token | self.calculate_max_length(token)).max().unwrap_or(0),
             Token::Sequence(token_vec) => token_vec.iter().map(| token | self.calculate_min_length(token)).sum(),
         }
@@ -744,14 +1009,10 @@ impl Expression {
 }
 
 fn main() {
-    let output_token: Result<ContextToken, String> = ExpressionParser::produce_token("(ab|cd|(e{x*2,}|a{,4})|f){,12}a".to_string());
+    let output_token: Result<ContextToken, String> = ExpressionParser::produce_token("(ab|cd|(e{x*2,}|a{,4})|f){,12}a");
     match output_token {
-        Ok(tk) => {
-            println!("{}", ExpressionParser::get_string(&tk.token));
-        }
-        Err(er) => {
-            println!("{}", er);
-        }
+        Ok(tk) => println!("{}", ExpressionParser::get_string(&tk.token)),
+        Err(er) => println!("{}", er),
     }
 }
 
@@ -768,7 +1029,7 @@ mod tests {
             let ctx: HashMap<String, i32> = HashMap::new();
             let test_calculation: Bound = Bound::Calculation(Box::new(Bound::Literal(5)), Operation::Multiply, Box::new(Bound::Literal(10)));
             let result = Bound::calculate_bound(&test_calculation, &ctx);
-            assert_eq!(result.unwrap(), 50usize);
+            assert_eq!(result.unwrap(), 50);
         }
 
         #[test]
@@ -776,7 +1037,7 @@ mod tests {
             let ctx: HashMap<String, i32> = HashMap::new();
             let test_calculation: Bound = Bound::Calculation(Box::new(Bound::Literal(5)), Operation::Add, Box::new(Bound::Literal(10)));
             let result = Bound::calculate_bound(&test_calculation, &ctx);
-            assert_eq!(result.unwrap(), 15usize);
+            assert_eq!(result.unwrap(), 15);
         }
 
         #[test]
@@ -784,7 +1045,7 @@ mod tests {
             let ctx: HashMap<String, i32> = HashMap::new();
             let test_calculation: Bound = Bound::Calculation(Box::new(Bound::Literal(10)), Operation::Subtract, Box::new(Bound::Literal(5)));
             let result = Bound::calculate_bound(&test_calculation, &ctx);
-            assert_eq!(result.unwrap(), 5usize);
+            assert_eq!(result.unwrap(), 5);
         }
 
         #[test]
@@ -794,75 +1055,71 @@ mod tests {
             let add_calculation: Bound = Bound::Calculation(Box::new(Bound::Literal(3)), Operation::Add, Box::new(sub_calculation));
             let mult_calculation: Bound = Bound::Calculation(Box::new(Bound::Literal(5)), Operation::Multiply, Box::new(add_calculation));
             let result = Bound::calculate_bound(&mult_calculation, &ctx);
-            assert_eq!(result.unwrap(), 25usize);
+            assert_eq!(result.unwrap(), 25);
         }
 
         #[test]
         fn test_bound_str_creation() {
-            let parser = ExpressionParser::new();
+            let mut parser = ExpressionParser::new();
             let bound_str = "5*4-10*2".into();
             let bound = parser.get_bound_from_string(&bound_str, 0).unwrap();
             let result = Bound::calculate_bound(&bound, &parser.context);
-            assert_eq!(result.unwrap(), 0usize);
+            assert_eq!(result.unwrap(), 0);
         }
 
         #[test]
         fn test_bound_str_creation_var() {
             let mut parser = ExpressionParser::new();
-            parser.context.insert("a".into(), 4);
             let bound_str = "5*a-10".into();
             let bound = parser.get_bound_from_string(&bound_str, 0).unwrap();
+            parser.context.insert("a".into(), 4);
             let result = Bound::calculate_bound(&bound, &parser.context);
-            assert_eq!(result.unwrap(), 10usize);
+            assert_eq!(result.unwrap(), 10);
         }
 
         #[test]
         fn test_bound_str_creation_vars() {
             let mut parser = ExpressionParser::new();
+            let bound_str = "a*b-c+a".into();
+            let bound = parser.get_bound_from_string(&bound_str, 0).unwrap();
             parser.context.insert("a".to_string(), 5);
             parser.context.insert("b".to_string(), 4);
             parser.context.insert("c".to_string(), 10);
-            let bound_str = "a*b-c+a".into();
-            let bound = parser.get_bound_from_string(&bound_str, 0).unwrap();
             let result = Bound::calculate_bound(&bound, &parser.context);
-            assert_eq!(result.unwrap(), 15usize);
+            assert_eq!(result.unwrap(), 15);
         }
 
         #[test]
         fn test_bound_complex_bracket() {
-            let parser = ExpressionParser::new();
+            let mut parser = ExpressionParser::new();
             let bound_str = "(2-1)*3+(3*(7-4)-1)-2".into();
             let bound = parser.get_bound_from_string(&bound_str, 0).unwrap();
             let result = Bound::calculate_bound(&bound, &parser.context);
-            assert_eq!(result.unwrap(), 9usize);
+            assert_eq!(result.unwrap(), 9);
         }
 
         #[test]
         fn test_bound_implicit_mult() {
             let mut parser = ExpressionParser::new();
-            parser.context.insert("x".into(), 5);
             let bound_str = "5(6)+2x+2(3)(4)-3(2(2))".into();
             let bound = parser.get_bound_from_string(&bound_str, 0).unwrap();
+            parser.context.insert("x".into(), 5);
             let result = Bound::calculate_bound(&bound, &parser.context);
-            assert_eq!(result.unwrap(), 52usize);
+            assert_eq!(result.unwrap(), 52);
         }
 
         #[test]
-        #[should_panic]
         fn test_bound_invalid_op() {
             let mut parser = ExpressionParser::new();
-            parser.context.insert("x".into(), 5);
             let bound_str = "5+(+5)".into();
-            parser.get_bound_from_string(&bound_str, 0).unwrap();
+            assert!(parser.get_bound_from_string(&bound_str, 0).is_err());
         }
 
         #[test]
-        #[should_panic]
         fn test_bound_invalid_bracket() {
             let mut parser = ExpressionParser::new();
-            parser.context.insert("x".into(), 5);
             let bound_str = ")5+4(".into();
-            parser.get_bound_from_string(&bound_str, 0).unwrap();
+            assert!(parser.get_bound_from_string(&bound_str, 0).is_err());
         }
     }
 
@@ -913,9 +1170,9 @@ mod tests {
         #[test]
         fn test_complex_repetition_parsing() {
             let mut parser = ExpressionParser::new();
+            let mut result = parser.parse_repetition(Token::Sequence(vec![Token::Literal("a".into())]), &"{(2+a)b,(b)(((b)}".chars().collect(), 0).unwrap().0;
             parser.context.insert("a".into(), 2);
             parser.context.insert("b".into(), 5);
-            let mut result = parser.parse_repetition(Token::Sequence(vec![Token::Literal("a".into())]), &"{(2+a)b,(b)(((b)}".chars().collect(), 0).unwrap().0;
             match result {
                 Token::Repetition(_, bound_a, bound_b) => {
                     let a = Bound::calculate_bound(&bound_a, &parser.context).unwrap();
@@ -949,5 +1206,190 @@ mod tests {
     mod general_parser {
         use super::*;
 
+        fn test_expression(expression: &str, expected_token: Token) {
+            let output_token = ExpressionParser::produce_token(expression.into()).unwrap().token;
+            assert!(output_token == expected_token, "\nExpected:\n{}\nGot:\n{}", ExpressionParser::get_string(&expected_token), ExpressionParser::get_string(&output_token));
+        }
+
+        fn test_error(expression: &str) {
+            let output_token = ExpressionParser::produce_token(expression.into());
+            assert!(output_token.is_err(), "Invalid expression '{}' incorrectly parsed as valid\nExpression tree:\n{}", expression, ExpressionParser::get_string(&output_token.unwrap().token));
+        }
+
+        #[test]
+        fn parse_choice() {
+            let expected_token = Token::Choice(vec![
+                Token::Literal("abc".into()), 
+                Token::Literal("def".into()), 
+                Token::Literal("ghi".into())
+            ]);
+            test_expression("abc|def|ghi", expected_token);
+        }
+
+        #[test]
+        fn parse_choice_sequence() {
+            let expected_token = Token::Sequence(vec![
+                Token::Literal("a".into()),
+                Token::Choice(vec![
+                    Token::Literal("ab".into()),
+                    Token::Literal("cd".into()),
+                ]),
+                Token::Choice(vec![
+                    Token::Literal("a".into()),
+                    Token::Literal("b".into()),
+                ]),
+                Token::Literal("b".into())
+            ]);
+            test_expression("a(ab|cd)(a|b)b", expected_token);
+        }
+
+        #[test]
+        fn parse_repetition() {
+            let mut expected_token = Token::Repetition(
+                Box::new(Token::Literal("a".into())),
+                Bound::Literal(1), 
+                Bound::Literal(5)
+            );
+            test_expression("a{1,5}", expected_token);
+
+            expected_token = Token::Repetition(
+                Box::new(Token::Literal("a".into())),
+                Bound::Literal(1), 
+                Bound::Literal(REPEAT_LIMIT)
+            );
+            test_expression("a{1,}", expected_token);
+
+            expected_token = Token::Repetition(
+                Box::new(Token::Literal("a".into())),
+                Bound::Literal(0), 
+                Bound::Literal(REPEAT_LIMIT)
+            );
+            test_expression("a{,}", expected_token);
+        }
+
+        #[test]
+        fn parse_multi_repetition() {
+            let expected_token = Token::Sequence(vec![
+                Token::Literal("ab".into()),
+                Token::Repetition(Box::new(Token::Literal("a".into())), Bound::Literal(0), Bound::Literal(1)),
+                Token::Repetition(Box::new(Token::Literal("b".into())), Bound::Literal(1), Bound::Literal(REPEAT_LIMIT)),
+                Token::Repetition(Box::new(Token::Literal("c".into())), Bound::Literal(1), Bound::Literal(3)),
+                Token::Literal("cd".into()),
+            ]);
+            test_expression("ab(a?)(b+)(c{1,3})cd", expected_token);
+        }
+
+        #[test]
+        fn parse_excessive_bracketing() {
+            let expected_token = Token::Repetition(
+                Box::new(Token::Literal("a".into())),
+                Bound::Literal(0), 
+                Bound::Literal(1)
+            );
+            test_expression("(((((a))?)))", expected_token);
+        }
+
+        #[test]
+        fn parse_nested_repetition() {
+            let mut expected_token = Token::Sequence(vec![
+                Token::Literal("ab".into()),
+                Token::Repetition(Box::new(
+                    Token::Sequence(vec![
+                        Token::Literal("a".into()),
+                        Token::Repetition(
+                            Box::new(Token::Literal("c".into())), Bound::Literal(1), Bound::Literal(3)
+                        ),
+                        Token::Literal("a".into())])),
+                Bound::Literal(0), Bound::Literal(1))
+            ]);
+            test_expression("ab((a(c{1,3})a)?)", expected_token);
+
+            expected_token = Token::Repetition(
+                Box::new(Token::Repetition(
+                    Box::new(Token::Repetition(
+                        Box::new(Token::Repetition(
+                            Box::new(Token::Repetition(Box::new(Token::Literal("a".into())), Bound::Literal(0), Bound::Literal(1))
+                        ), Bound::Literal(0), Bound::Literal(1))
+                    ), Bound::Literal(0), Bound::Literal(REPEAT_LIMIT))
+                ), Bound::Literal(1), Bound::Literal(REPEAT_LIMIT))
+            ), Bound::Literal(0), Bound::Literal(1));
+            test_expression("a??*+?", expected_token);
+        }
+
+        #[test]
+        fn parse_nested_complex() {
+            let expected_token = Token::Choice(vec![
+                Token::Sequence(vec![
+                    Token::Literal("a".into()),
+                    Token::Repetition(
+                        Box::new(Token::Choice(vec![
+                            Token::Sequence(vec![
+                                Token::Repetition(
+                                    Box::new(Token::Literal("a".into())),
+                                    Bound::Literal(1),
+                                    Bound::Literal(2)
+                                ),
+                                Token::Literal("bc".into())
+                            ]),
+                            Token::Repetition(
+                                Box::new(Token::Literal("e".into())),
+                                Bound::Literal(0),
+                                Bound::Literal(1)
+                            ),
+                            Token::Sequence(vec![
+                                Token::Literal("gg".into()),
+                                Token::Choice(vec![
+                                    Token::Literal("a".into()),
+                                    Token::Literal("b".into()),
+                                    Token::Choice(vec![
+                                        Token::Repetition(
+                                            Box::new(Token::Literal("c".into())),
+                                            Bound::Literal(3),
+                                            Bound::Literal(3)
+                                        ),
+                                        Token::Repetition(
+                                            Box::new(Token::Literal("d".into())),
+                                            Bound::Literal(1),
+                                            Bound::Literal(3)
+                                        )
+                                    ])
+                                ])
+                            ])
+                        ])),
+                        Bound::Literal(1),
+                        Bound::Literal(2)
+                    )
+                ]),
+                Token::Literal("abc".into())
+            ]);
+            test_expression("a(a{1,2}bc|e?|gg(a|b|(c{3}|d{1,3}))){1,2}|abc".into(), expected_token);
+        }
+
+        #[test]
+        fn parse_unclean() {
+            let expected_token = Token::Sequence(vec![
+                Token::Literal("a".into()),
+                Token::Choice(vec![
+                    Token::Literal("ab".into()),
+                    Token::Literal("cd".into()),
+                ]),
+                Token::Choice(vec![
+                    Token::Literal("a".into()),
+                    Token::Literal("b".into()),
+                ]),
+                Token::Literal("b".into())
+            ]);
+            test_expression("   \na\t(ab| c d  ) \n(a | b)\n\tb", expected_token);            
+        }
+    
+        #[test]
+        fn parse_invalid() {
+            test_error("a{}.");
+            test_error("((a)()");
+            test_error("|a|b");
+            test_error("(a{)a,b}");
+            test_error("?a");
+            test_error("a({a, b})");
+        }
     }
 }
