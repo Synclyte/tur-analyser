@@ -1,13 +1,13 @@
 use std::{collections::{HashMap, HashSet}, env::var, ops::Range, usize, vec};
 use rand::{Rng, rng, rngs::ThreadRng, seq::{IndexedRandom, SliceRandom}};
 
-const REPEAT_LIMIT: i32 = 256;
+const REPEAT_LIMIT: i32 = 128;
 
 // token struct for representing regular expressions
 // covers all basic regex operations 
 // essentially an AST for expanded regex
 
-#[derive(PartialEq, Clone)]
+#[derive(PartialEq, Clone, Eq, Hash)]
 enum Token {
     Literal(String),
     Repetition(Box<Token>, Bound, Bound),
@@ -37,7 +37,7 @@ struct ContextToken {
 }
 
 // mathematical operations - used for calculating discrete repetition `Bound` values
-#[derive(Clone, PartialEq)]
+#[derive(Clone, PartialEq, Eq, Hash)]
 enum Operation {
     Add,
     Subtract,
@@ -64,7 +64,7 @@ impl Operation {
 }
 
 // calculation tree - provides a means to calculate the value of a given mathematical expression
-#[derive(PartialEq)]
+#[derive(PartialEq, Eq, Hash)]
 enum Bound {
     Literal(i32),
     Variable(String),
@@ -579,14 +579,17 @@ impl ContextToken {
     // reject instantly if this is not possible
     // or generate through backtracking from possible lengths. should always produce a correct string of length n
     fn generate_string_to_length(&self, token: &Token, variables: &HashMap<String, i32>, target_length: usize) -> Option<String> {
-        let possible_lengths=  self.get_possible_token_lengths(token, variables, target_length);
+        let mut token_length_cache: HashMap<Token, HashSet<usize>> = HashMap::new();
+        // gets all token lengths for this input and builds the length HashSet cache
+        let possible_lengths=  self.get_possible_token_lengths(token, variables, target_length, &mut token_length_cache);
         if !possible_lengths.contains(&target_length) {
             return None;
         }
-        self.generate_exact_length_string(token, variables, target_length)
+        
+        self.generate_exact_length_string(token, variables, target_length, target_length, &mut token_length_cache)
     }
 
-    fn generate_exact_length_string(&self, token: &Token, variables: &HashMap<String, i32>, target_length: usize) -> Option<String> {
+    fn generate_exact_length_string(&self, token: &Token, variables: &HashMap<String, i32>, target_length: usize, length_limit: usize, token_length_cache: &mut HashMap<Token, HashSet<usize>>) -> Option<String> {
         let mut rng = rand::rng();
 
         match token {
@@ -597,7 +600,7 @@ impl ContextToken {
             },
             Token::Choice(tokens) => {
                 let mut valid_choices: Vec<&Token> = tokens.iter()
-                    .filter(| tok | self.get_possible_token_lengths(*tok, variables, target_length).contains(&target_length))
+                    .filter(| tok | self.get_possible_token_lengths(*tok, variables, length_limit, token_length_cache).contains(&target_length))
                     .collect();
 
                 if valid_choices.is_empty() {
@@ -605,7 +608,7 @@ impl ContextToken {
                 }
 
                 let choice = valid_choices[rng.random_range(0..valid_choices.len())];
-                self.generate_exact_length_string(choice, variables, target_length)
+                self.generate_exact_length_string(choice, variables, target_length, length_limit, token_length_cache)
             },
             Token::Repetition(repetition_token, lower_bound, upper_bound) => {
                 let lower_result = lower_bound.calculate_bound(variables).unwrap_or(0).max(0) as usize;
@@ -613,7 +616,7 @@ impl ContextToken {
 
                 // treat repetitions as a sequence
                 let mut min_length = usize::MAX;
-                for length in self.get_possible_token_lengths(repetition_token, variables, target_length).iter() {
+                for length in self.get_possible_token_lengths(repetition_token, variables, length_limit, token_length_cache).iter() {
                     if length < &min_length {
                         min_length = length.clone();
                     }
@@ -634,19 +637,19 @@ impl ContextToken {
                 for repetition_count in valid_repetitions {
                     // form a sequence token instead, have this be solved by the sequence solver
                     let sequence_token = Token::Sequence(vec![repetition_token.as_ref().clone(); repetition_count]);
-                    if let Some(valid_string) = self.generate_exact_length_string(&sequence_token, variables, target_length) {
+                    if let Some(valid_string) = self.generate_exact_length_string(&sequence_token, variables, target_length, length_limit, token_length_cache) {
                         return Some(valid_string);
                     }
                 }
                 None
             },
             Token::Sequence(tokens) => {
-                self.generate_valid_sequence_partition(tokens, variables, 0, target_length)
+                self.generate_valid_sequence_partition(tokens, variables, 0, target_length, length_limit, token_length_cache)
             }
         }
     }
 
-    fn generate_valid_sequence_partition(&self, tokens: &[Token], variables: &HashMap<String, i32>, index: usize, remaining_length: usize) -> Option<String> {
+    fn generate_valid_sequence_partition(&self, tokens: &[Token], variables: &HashMap<String, i32>, index: usize, remaining_length: usize, length_limit: usize, token_length_cache: &mut HashMap<Token, HashSet<usize>>) -> Option<String> {
         // recursive exit case
         if index == tokens.len() {
             if remaining_length == 0 {
@@ -658,21 +661,42 @@ impl ContextToken {
         // gets all possible token lengths which would work for generating a string of length n
         // and then shuffles them such that generated strings have variety
         let current_token = tokens.get(index).unwrap();
-        let mut possible_token_lengths: Vec<usize> = self.get_possible_token_lengths(current_token, variables, remaining_length)
+        let mut possible_token_lengths: Vec<usize> = self.get_possible_token_lengths(current_token, variables, remaining_length, token_length_cache)
             .into_iter()
+            .filter(|&l| l <= remaining_length)
             .collect();
 
         let mut rng = rand::rng();
         possible_token_lengths.shuffle(&mut rng);
 
+        let next_tokens: Vec<Token> = tokens.iter().skip(index + 1).cloned().collect();
+        let sequence_remainder = if !next_tokens.is_empty() {
+            Some(Token::Sequence(next_tokens))
+        } else {
+            None
+        };
+
         // partitioner logic - repeatedly evaluates whether making this partition would make reaching 
         // the target length impossible, and takes it if it won't
         for &possible_length in &possible_token_lengths {
             let partition_length = remaining_length - possible_length;
+
+            // prune branches of expression which are unable to ever produce the correct length
+            if let Some(remainder) = &sequence_remainder {
+                let possible_remainder_lengths = self.get_possible_token_lengths(remainder, variables, length_limit, token_length_cache);
+                if !possible_remainder_lengths.contains(&partition_length) {
+                    continue;
+                }
+            } else {
+                if partition_length != 0 {
+                    continue;
+                }
+            }
+
             // recursively generate the rest of this partition
-            if let Some(partition_remainder) = self.generate_valid_sequence_partition(tokens, variables, index + 1, partition_length) {
+            if let Some(partition_remainder) = self.generate_valid_sequence_partition(tokens, variables, index + 1, partition_length, length_limit, token_length_cache) {
                 // if the rest of the partition can be valid, generate the current part
-                if let Some(generated_partition) = self.generate_exact_length_string(current_token, variables, possible_length) {
+                if let Some(generated_partition) = self.generate_exact_length_string(current_token, variables, possible_length, length_limit, token_length_cache) {
                     return Some(generated_partition + &partition_remainder);
                 }
             }
@@ -680,7 +704,13 @@ impl ContextToken {
         None
     }
 
-    fn get_possible_token_lengths(&self, token: &Token, variables: &HashMap<String, i32>, range: usize) -> HashSet<usize> {
+    fn get_possible_token_lengths(&self, token: &Token, variables: &HashMap<String, i32>, length_limit: usize, token_length_cache: &mut HashMap<Token, HashSet<usize>>) -> HashSet<usize> {
+        // this function only needs to be executed once over the full Token - after that point, every possible sublength HashSet has been generated, and
+        // can then be served with a cache
+        if let Some(cache_hit) = token_length_cache.get(token) {
+            return cache_hit.clone();
+        }
+        
         let mut lengths = HashSet::new();
 
         match token {
@@ -689,17 +719,17 @@ impl ContextToken {
             },
             Token::Choice(tokens) => {
                 for token in tokens {
-                    lengths.extend(self.get_possible_token_lengths(token, variables, range));
+                    lengths.extend(self.get_possible_token_lengths(token, variables, length_limit, token_length_cache));
                 }
             },
             Token::Repetition(repeated_token, lower, upper) => {
                 let lower_result = lower.calculate_bound(variables).unwrap_or(0).max(0);
                 let upper_result = upper.calculate_bound(variables).unwrap_or(0).max(0);
-                let repetition_token_lengths = self.get_possible_token_lengths(repeated_token, variables, range);
+                let repetition_token_lengths = self.get_possible_token_lengths(repeated_token, variables, length_limit, token_length_cache);
                 let mut valid_lengths: HashSet<usize> = HashSet::new();
 
+                // holds all of the possible lengths reachable from the current repetition iteration
                 let mut current_cache = HashSet::from([0]);
-                let mut total_cache = HashSet::from([0]);
 
                 if lower_result == 0 {
                     valid_lengths.insert(0);
@@ -714,16 +744,12 @@ impl ContextToken {
                         for &repetition_length in &repetition_token_lengths {
                             let combined_length = current_length + repetition_length;
 
-                            if combined_length <= range {
+                            // if the length is within acceptable limit, add it to the next cache
+                            if combined_length <= length_limit {
+                                next_cache.insert(combined_length);
+                                // and if it is above the lower bound, add it to the possible results
                                 if count >= lower_result {
                                     valid_lengths.insert(combined_length);
-                                }
-
-                                // if this has been seen before, exclude it from the next cache check, as we are already
-                                // following the succession of this value
-                                if !total_cache.contains(&combined_length) {
-                                    next_cache.insert(combined_length);
-                                    total_cache.insert(combined_length);
                                 }
                             }
                         }
@@ -742,14 +768,14 @@ impl ContextToken {
                 // could track another range here and decrement based on the minimum length in token_lengths
                 // very similar, but simpler solution to repetitions
                 for s_token in tokens {
-                    let token_lengths = self.get_possible_token_lengths(s_token, variables, range);
+                    let token_lengths = self.get_possible_token_lengths(s_token, variables, length_limit, token_length_cache);
                     let mut next_cache: HashSet<usize> = HashSet::new();
 
                     for &current_length in &current_cache {
                         for &token_length in &token_lengths {
                             let combined_length = current_length + token_length;
 
-                            if combined_length <= range {
+                            if combined_length <= length_limit {
                                 next_cache.insert(combined_length);
                             }
                         }
@@ -765,6 +791,7 @@ impl ContextToken {
             }
         }
 
+        token_length_cache.insert(token.clone(), lengths.clone());
         lengths
     }
 
@@ -784,7 +811,9 @@ impl ContextToken {
             }
         };
 
-        let max_iterations = 500;
+        // estimation of iterations necessary for convergence - not a good heuristic, as it is not possible
+        // to assess the complexity of an expression through length alone
+        let max_iterations = 50 + target_length * 4;
 
         let mut rng = rand::rng();
         let mut var_state = self.context.clone();
@@ -794,6 +823,12 @@ impl ContextToken {
         let mut best_diff = calculate_difference_from_target(&var_state);
         let init_temp = target_length as f64;
 
+        // for each iteration, run a basic annealer:
+        // mutate a random variable
+        // fix broken constraints such that variables do not violate bound ranges
+        // evaluate whether to accept the new variable set based on:
+        //  always accept if it improves the result
+        //  sometimes accept bad results based on the temperature to attempt to escape local maxima
         for i in 0..max_iterations {
             if best_diff == 0 {
                 return best_vars;
@@ -839,6 +874,7 @@ impl ContextToken {
         }).max(0);
     }
 
+    // simple recursive max length calculator
     fn calculate_max_length(&self, analysed_token: &Token, context: &HashMap<String, i32>) -> usize {
         return match analysed_token {
             Token::Literal(literal) => literal.len(),
@@ -935,7 +971,7 @@ impl ContextToken {
 
     /// fixes constraints post-mutation such that all are fulfilled
     fn enforce_constraints(variables: &mut HashMap<String, i32>, dependency_graph: &DependencyGraph) {
-        let search_limit: i32 = 200;
+        let search_limit: i32 = 100;
 
         // tracks constraints which have already been modified such that they are not modified again
         let mut processed_vars: HashSet<String> = HashSet::new();
@@ -1041,226 +1077,6 @@ impl ContextToken {
             _ => {}
         }
         return contained_vars;
-    }
-}
-
-
-struct Expression { 
-    c_token: ContextToken,
-    min_length: usize,
-}
-
-// deprecated, ContextToken now used instead to generate strings
-impl Expression {
-    pub fn from_token(&self, expression_token: ContextToken) -> Result<Expression, String> {
-        let min_gen_length: usize = self.calculate_min_length(&expression_token.token);
-        return Ok(Expression { c_token: expression_token, min_length: min_gen_length });
-    }
-
-    pub fn from_string(&self, expression_string: &str) -> Result<Expression, String> {
-        let expression_token: ContextToken = ExpressionParser::produce_token(expression_string)?;
-        let min_gen_length: usize = self.calculate_min_length(&expression_token.token);
-        return Ok(Expression { c_token: expression_token, min_length: min_gen_length });
-    }
-
-    pub fn gen_to_length(&self, length: usize) -> Vec<String> {
-        const SAMPLES: usize = 100;
-        let mut generated_strings: Vec<String> = Vec::new();
-
-        for _ in 0..SAMPLES {
-            let new_string: Result<String, String> = self.recur_to_length(&self.c_token.token, length);
-            match new_string {
-                Ok(string) => generated_strings.push(string),
-                Err(_) => {},
-            }
-        }
-        return generated_strings;
-    }
-
-    pub fn recur_to_length(&self, expression_token: &Token, target_length: usize) -> Result<String, String> {
-        let max_length: usize = self.calculate_max_length(expression_token);
-        let min_length: usize = self.calculate_min_length(expression_token);
-
-        // if the max length reachable is below the target, or the min length is above, fail and exit
-        if max_length < target_length || min_length > target_length {
-            return Err("Impossible to reach target from current state".to_string());
-        }
-        // if target length has elapsed, exit out successfully
-        if target_length == 0 {
-            return Ok("".to_string());
-        }
-
-        match expression_token {
-            Token::Literal(literal) => {
-                return Ok(literal.to_string());
-            }
-            Token::Repetition(token, lower_bound, upper_bound) => {
-                let context: &HashMap<String, i32> = &self.c_token.context;
-
-                let inner_token: &Token = token.as_ref();
-                let lower: usize = Bound::calculate_bound(lower_bound, context).ok_or("Negative lower bound length".to_string())? as usize;
-                let upper: usize = Bound::calculate_bound(upper_bound, context).ok_or("Negative upper bound length".to_string())? as usize;
-                let inner_min: usize = Expression::calculate_min_length(&self, inner_token);
-                let inner_max: usize = Expression::calculate_max_length(&self, inner_token);
-
-                let mut bound_targets: Vec<Vec<usize>> = Vec::new();
-                let mut min_vec: Vec<usize> = vec![inner_min; lower];
-                let mut max_vec: Vec<usize> = vec![inner_max; lower];
-                // this may cause issues with length 0 subtokens - these should be optimised out by setting this lower bound to 0 and removing the length 0 subtoken
-                // generates lists of possible partitions
-                for _ in lower..upper {
-                    let targets = Expression::produce_partitions(&min_vec, &max_vec, target_length);
-                    if targets.is_ok() {
-                        bound_targets.push(targets.unwrap());
-                    }
-                    else {
-                        break;
-                    }
-                    min_vec.push(inner_min);
-                    max_vec.push(inner_max);
-                }
-
-                // uses built lists of possible partitions to attempt to produce strings
-                for i in 0..bound_targets.len() {
-                    let next_string: Result<Vec<String>, String> = bound_targets[i].iter().map(| target | self.recur_to_length(inner_token, *target)).collect();
-                    if next_string.is_ok() {
-                        return Ok(next_string.unwrap().join(""));
-                    }
-                }
-                return Err("Could not find valid string configuration for repetition".to_string());
-            }
-            Token::Choice(tokens) => {
-                let acceptable_tokens: Vec<&Token> = tokens.iter()
-                    .filter(| token | self.calculate_max_length(token) >= target_length && self.calculate_min_length(token) <= target_length)
-                    .collect();
-
-                return match acceptable_tokens.choose(&mut rng()) {
-                    Some(token) => self.recur_to_length(*token, target_length),
-                    None => Err("Error: Failed to find valid choice for choice token in string generation".to_string()),
-                }
-            }
-            Token::Sequence(tokens) => {
-                let component_min_lengths: Vec<usize> = tokens.iter().map(| token | self.calculate_min_length(token)).collect();
-                let component_max_lengths: Vec<usize> = tokens.iter().map(| token | self.calculate_max_length(token)).collect();
-
-                let partition_targets: Vec<usize> = Expression::produce_partitions( &component_min_lengths, &component_max_lengths, target_length)?;
-                return Ok(tokens.iter().zip(partition_targets.iter())
-                    .map(| (token, length) | self.recur_to_length(token, *length))
-                    .collect::<Result<Vec<String>, String>>()?
-                    .join(""));
-            }
-        }
-    }
-
-    // calculates the minimum bound of a full `Token` object
-    fn calculate_min_bound(&self, token: &Token) -> Bound {
-        return match token {
-            Token::Literal(lit) => Bound::Literal(lit.len() as i32),
-            // repetitions are calculated by multiplying the min bound of a token by its min length, resulting in the min total
-            Token::Repetition(inner_token, lower, _) => Bound::Calculation(Box::new(Expression::calculate_min_bound(&self, inner_token.as_ref())), Operation::Multiply, Box::new(lower.clone())),
-            // choices are calculated through finding the min bound for the shortest possible choice token
-            Token::Choice(choices) => Expression::calculate_min_bound(&self, choices.iter()
-                .min_by_key(| choice | Expression::calculate_min_length(&self, *choice))
-                .unwrap_or(&Token::Literal("".to_string()))),
-            // sequences are calculated through producing the sum of the min bound of all sequence tokens
-            Token::Sequence(sequence) => match sequence.len() {
-                0 => Bound::Literal(0),
-                1 => self.calculate_min_bound(sequence.first().unwrap()),
-                _ => {
-                    let mut result: Bound = Bound::Literal(0);
-                    for i in 0..sequence.len() {
-                        result = Bound::Calculation(Box::new(result), Operation::Add, Box::new(self.calculate_min_bound(sequence.get(i).unwrap())));
-                    }
-                    result
-                }
-            }
-        }
-    }
-
-    // operates the same as min bound, but with some functions flipped to instead calculate the max bound
-    fn calculate_max_bound(&self, token: &Token) -> Bound {
-        return match token {
-            Token::Literal(lit) => Bound::Literal(lit.len() as i32),
-            Token::Repetition(inner_token, _, upper) => Bound::Calculation(Box::new(Expression::calculate_max_bound(&self, inner_token.as_ref())), Operation::Multiply, Box::new(upper.clone())),
-            Token::Choice(choices) => Expression::calculate_max_bound(&self, choices.iter()
-                .max_by_key(| choice | Expression::calculate_max_length(&self, *choice))
-                .unwrap_or(&Token::Literal("".to_string()))),
-            Token::Sequence(sequence) => match sequence.len() {
-                0 => Bound::Literal(0),
-                1 => self.calculate_max_bound(sequence.first().unwrap()),
-                _ => {
-                    let mut result: Bound = Bound::Literal(0);
-                    for i in 0..sequence.len() {
-                        result = Bound::Calculation(Box::new(result), Operation::Add, Box::new(self.calculate_max_bound(sequence.get(i).unwrap())));
-                    }
-                    result
-                }
-            }
-        }        
-    }
-
-    // biased simple partition producer
-    fn produce_partitions(lower: &[usize], upper: &[usize], target_length: usize) -> Result<Vec<usize>, String> {
-        let min_lower: usize = lower.iter().sum();
-        let max_upper: usize = upper.iter().sum();
-        let partitions: usize = lower.len();
-        let mut lengths: Vec<usize> = Vec::with_capacity(partitions);
-
-        if target_length < min_lower || target_length > max_upper {
-            return Err("Target lengths are invalid for partitioning".to_string());
-        }
-
-        let mut remaining_allocation: usize = target_length - min_lower;
-        // implements random bounded composition to find valid random allocations of size to each partition
-        for i in 0..partitions {
-            let lower_partition: usize = lower[i];
-            let upper_partition: usize = upper[i];
-            let max_allocation: usize = upper_partition - lower_partition;
-            let allocation: usize;
-
-            // if this is the final allocation, allocate the remainder of length to this partition
-            if i == partitions - 1 {
-                allocation = remaining_allocation;
-            }
-            // otherwise, allocate a random amount of length between 0 and the remaining allocation/max allocation to it
-            else {
-                allocation = rand::rng().random_range(0..=remaining_allocation.min(max_allocation));
-            }
-            lengths.push(lower_partition + allocation);
-            remaining_allocation -= allocation;
-        }
-
-        return Ok(lengths);
-    }
-
-    fn calculate_min_length(&self, analysed_token: &Token) -> usize {
-        return match analysed_token {
-            Token::Literal(literal) => literal.len(),
-            Token::Repetition(repeated_token, lower_bound, _) => self.calculate_min_length(repeated_token.as_ref()) * Bound::calculate_bound(lower_bound, &self.c_token.context).unwrap_or(0) as usize,
-            Token::Choice(token_vec) => token_vec.iter().map(| token | self.calculate_min_length(token)).min().unwrap_or(0),
-            Token::Sequence(token_vec) => token_vec.iter().map(| token | self.calculate_min_length(token)).sum(),
-        };
-    }
-
-    fn calculate_max_length(&self, analysed_token: &Token) -> usize {
-        return match analysed_token {
-            Token::Literal(literal) => literal.len(),
-            Token::Repetition(repeated_token, _, upper_bound) => self.calculate_max_length(repeated_token.as_ref()) * Bound::calculate_bound(upper_bound, &self.c_token.context).unwrap_or(0) as usize,
-            Token::Choice(token_vec) => token_vec.iter().map(| token | self.calculate_max_length(token)).max().unwrap_or(0),
-            Token::Sequence(token_vec) => token_vec.iter().map(| token | self.calculate_min_length(token)).sum(),
-        }
-    }
-
-    // overflow-resilient summing function
-    fn overflow_sum<I>(iter: I) -> usize where I: IntoIterator<Item = usize> {
-        let mut sum: usize = 0;
-        for value in iter {
-            match sum.checked_add(value) {
-                Some(value) => sum = value,
-                None => return usize::MAX,
-            }
-        }
-        return sum;
     }
 }
 
