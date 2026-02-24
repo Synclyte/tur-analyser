@@ -1,5 +1,5 @@
-use std::{collections::{HashMap, HashSet}, usize, vec, ops::Range};
-use rand::{Rng, rng, rngs::ThreadRng, seq::IndexedRandom};
+use std::{collections::{HashMap, HashSet}, env::var, ops::Range, usize, vec};
+use rand::{Rng, rng, rngs::ThreadRng, seq::{IndexedRandom, SliceRandom}};
 
 const REPEAT_LIMIT: i32 = 256;
 
@@ -7,7 +7,7 @@ const REPEAT_LIMIT: i32 = 256;
 // covers all basic regex operations 
 // essentially an AST for expanded regex
 
-#[derive(PartialEq)]
+#[derive(PartialEq, Clone)]
 enum Token {
     Literal(String),
     Repetition(Box<Token>, Bound, Bound),
@@ -546,31 +546,7 @@ impl ExpressionParser {
 }
 
 impl ContextToken {
-    /// potential solutions:
-    ///     annealing - simplified GE which probabilistically finds a global maximum using a gradient descent-like algorithmic search with mutations
-    ///     pros - simpler, performant way to estimate a solution
-    ///     cons - may struggle with complex cases with many variables
-    /// 
-    ///     genetic algorithm - genetic search using variables as genes, maintaining a population over generations and gradually getting closer to a correct result
-    ///     pros - much more likely to find a correct answer, especially in complex cases with many variables. can also find many solutions simultaneously
-    ///     cons - much slower - may still struggle with complex cases with strangely shaped search spaces
-    /// 
-    /// both will require some methodology to enforce variable constraints - can be added to fitness function of a GE
-    /// constraints should be handled using a dependency graph, such that constraints are enforcable
-    /// 
-    ///     after this, the variables generated can be fed into another search algorithm to find a valid string based on literal-based ranges
-    /// 
-    ///     https://en.wikipedia.org/wiki/Simulated_annealing
-    ///     https://en.wikipedia.org/wiki/Genetic_algorithm
-    ///     https://en.wikipedia.org/wiki/Dependency_graph
-    ///     https://en.wikipedia.org/wiki/Topological_sorting#Kahn's_algorithm
-    /// 
-    /// end solution also needs a way to generate strings from these chosen variables
-    /// this could use a greedy generator with a budget of n (where n is the target length)
-    /// picking an option reduces the budget recursively until no more options are availible
-    /// could alternatively use a more intelligent algorithm to ensure a solution will always be found if it exists 
-
-    pub fn generate_to_length(&self, search_range: Range<usize>) -> Vec<String> {
+    pub fn generate_strings_in_range(&self, search_range: Range<usize>) -> Vec<String> {
         let mut generated_strings: Vec<String> = Vec::new();
         let mut lengths_generated: HashSet<usize> = HashSet::new();
 
@@ -579,12 +555,18 @@ impl ContextToken {
         let dependency_graph = self.get_dependency_graph();
 
         for target_length in search_range.clone() {
-            self.get_valid_variables(target_length, &dependency_graph);
-            let generated_string = self.generate_string(target_length);
-            let generated_length = generated_string.len();
+            let valid_vars = self.get_valid_variables(target_length, &dependency_graph);
+            let generated_string = self.generate_string_to_length(&self.token, &valid_vars, target_length.clone());
+            let valid_string = if let Some(inner_string) = generated_string {
+                inner_string
+            } else {
+                continue;
+            };
+
+            let generated_length = valid_string.len();
 
             if !lengths_generated.contains(&generated_length) && search_range.contains(&generated_length) {
-                generated_strings.push(generated_string);
+                generated_strings.push(valid_string);
                 lengths_generated.insert(generated_length);
             }
         }
@@ -593,23 +575,223 @@ impl ContextToken {
         return generated_strings;
     }
 
-    fn generate_string(&self, target_length: usize) -> String {
-        return String::new();
-        // TODO: finish
+    // get all lengths possible by each token (get_possible_token_lengths, recursive DP-based generator)
+    // reject instantly if this is not possible
+    // or generate through backtracking from possible lengths. should always produce a correct string of length n
+    fn generate_string_to_length(&self, token: &Token, variables: &HashMap<String, i32>, target_length: usize) -> Option<String> {
+        let possible_lengths=  self.get_possible_token_lengths(token, variables, target_length);
+        if !possible_lengths.contains(&target_length) {
+            return None;
+        }
+        self.generate_exact_length_string(token, variables, target_length)
+    }
+
+    fn generate_exact_length_string(&self, token: &Token, variables: &HashMap<String, i32>, target_length: usize) -> Option<String> {
+        let mut rng = rand::rng();
+
+        match token {
+            Token::Literal(literal) => if literal.len() == target_length {
+                Some(literal.clone())
+            } else {
+                None
+            },
+            Token::Choice(tokens) => {
+                let mut valid_choices: Vec<&Token> = tokens.iter()
+                    .filter(| tok | self.get_possible_token_lengths(*tok, variables, target_length).contains(&target_length))
+                    .collect();
+
+                if valid_choices.is_empty() {
+                    return None;
+                }
+
+                let choice = valid_choices[rng.random_range(0..valid_choices.len())];
+                self.generate_exact_length_string(choice, variables, target_length)
+            },
+            Token::Repetition(repetition_token, lower_bound, upper_bound) => {
+                let lower_result = lower_bound.calculate_bound(variables).unwrap_or(0).max(0) as usize;
+                let upper_result = upper_bound.calculate_bound(variables).unwrap_or(0).max(0) as usize;
+
+                // treat repetitions as a sequence
+                let mut min_length = usize::MAX;
+                for length in self.get_possible_token_lengths(repetition_token, variables, target_length).iter() {
+                    if length < &min_length {
+                        min_length = length.clone();
+                    }
+                    if min_length == 0 {
+                        break;
+                    }
+                }
+                if min_length == usize::MAX {
+                    return None;
+                }
+
+                // produce a vec of all "valid" repetition counts within the range provided and shuffle them so they can be randomly attempted
+                let mut valid_repetitions: Vec<usize> = (lower_result..=upper_result)
+                    .filter(| count | min_length * count <= target_length)
+                    .collect();
+                valid_repetitions.shuffle(&mut rng);
+
+                for repetition_count in valid_repetitions {
+                    // form a sequence token instead, have this be solved by the sequence solver
+                    let sequence_token = Token::Sequence(vec![repetition_token.as_ref().clone(); repetition_count]);
+                    if let Some(valid_string) = self.generate_exact_length_string(&sequence_token, variables, target_length) {
+                        return Some(valid_string);
+                    }
+                }
+                None
+            },
+            Token::Sequence(tokens) => {
+                self.generate_valid_sequence_partition(tokens, variables, 0, target_length)
+            }
+        }
+    }
+
+    fn generate_valid_sequence_partition(&self, tokens: &[Token], variables: &HashMap<String, i32>, index: usize, remaining_length: usize) -> Option<String> {
+        // recursive exit case
+        if index == tokens.len() {
+            if remaining_length == 0 {
+                return Some(String::new());
+            }
+            return None;
+        }
+
+        // gets all possible token lengths which would work for generating a string of length n
+        // and then shuffles them such that generated strings have variety
+        let current_token = tokens.get(index).unwrap();
+        let mut possible_token_lengths: Vec<usize> = self.get_possible_token_lengths(current_token, variables, remaining_length)
+            .into_iter()
+            .collect();
+
+        let mut rng = rand::rng();
+        possible_token_lengths.shuffle(&mut rng);
+
+        // partitioner logic - repeatedly evaluates whether making this partition would make reaching 
+        // the target length impossible, and takes it if it won't
+        for &possible_length in &possible_token_lengths {
+            let partition_length = remaining_length - possible_length;
+            // recursively generate the rest of this partition
+            if let Some(partition_remainder) = self.generate_valid_sequence_partition(tokens, variables, index + 1, partition_length) {
+                // if the rest of the partition can be valid, generate the current part
+                if let Some(generated_partition) = self.generate_exact_length_string(current_token, variables, possible_length) {
+                    return Some(generated_partition + &partition_remainder);
+                }
+            }
+        }
+        None
+    }
+
+    fn get_possible_token_lengths(&self, token: &Token, variables: &HashMap<String, i32>, range: usize) -> HashSet<usize> {
+        let mut lengths = HashSet::new();
+
+        match token {
+            Token::Literal(literal) => {
+                lengths.insert(literal.len());
+            },
+            Token::Choice(tokens) => {
+                for token in tokens {
+                    lengths.extend(self.get_possible_token_lengths(token, variables, range));
+                }
+            },
+            Token::Repetition(repeated_token, lower, upper) => {
+                let lower_result = lower.calculate_bound(variables).unwrap_or(0).max(0);
+                let upper_result = upper.calculate_bound(variables).unwrap_or(0).max(0);
+                let repetition_token_lengths = self.get_possible_token_lengths(repeated_token, variables, range);
+                let mut valid_lengths: HashSet<usize> = HashSet::new();
+
+                let mut current_cache = HashSet::from([0]);
+                let mut total_cache = HashSet::from([0]);
+
+                if lower_result == 0 {
+                    valid_lengths.insert(0);
+                }
+
+                // iteratively builds a cache of lengths
+                // this is not fast whatsoever, as it iterates through an increasing number of lengths
+                // (bounded by range) every iteration for every repetition. nested repetitions can destroy performance
+                for count in 1..=upper_result {
+                    let mut next_cache = HashSet::new();
+                    for &current_length in &current_cache {
+                        for &repetition_length in &repetition_token_lengths {
+                            let combined_length = current_length + repetition_length;
+
+                            if combined_length <= range {
+                                if count >= lower_result {
+                                    valid_lengths.insert(combined_length);
+                                }
+
+                                // if this has been seen before, exclude it from the next cache check, as we are already
+                                // following the succession of this value
+                                if !total_cache.contains(&combined_length) {
+                                    next_cache.insert(combined_length);
+                                    total_cache.insert(combined_length);
+                                }
+                            }
+                        }
+                    }
+                    current_cache = next_cache;
+
+                    // if there are no more values to explore, then exit this loop
+                    if current_cache.is_empty() {
+                        break;
+                    }
+                }
+                lengths = valid_lengths;
+            },
+            Token::Sequence(tokens) => {
+                let mut current_cache = HashSet::from([0]);
+                // could track another range here and decrement based on the minimum length in token_lengths
+                // very similar, but simpler solution to repetitions
+                for s_token in tokens {
+                    let token_lengths = self.get_possible_token_lengths(s_token, variables, range);
+                    let mut next_cache: HashSet<usize> = HashSet::new();
+
+                    for &current_length in &current_cache {
+                        for &token_length in &token_lengths {
+                            let combined_length = current_length + token_length;
+
+                            if combined_length <= range {
+                                next_cache.insert(combined_length);
+                            }
+                        }
+                    }
+                    current_cache = next_cache;
+
+                    if current_cache.is_empty() {
+                        break;
+                    }
+                }
+                
+                lengths = current_cache;
+            }
+        }
+
+        lengths
     }
 
     /// uses an annealing-based approach to find valid variables based on constraints
     fn get_valid_variables(&self, target_length: usize, dependency_graph: &DependencyGraph) -> HashMap<String, i32> {
-        // for random mutations
+        // gets the difference between the min/max lengths and the target value
+        let calculate_difference_from_target = | variables: &HashMap<String, i32> | -> usize {
+            let min_length = self.calculate_min_length(&self.token, variables);
+            let max_length = self.calculate_max_length(&self.token, variables);
+
+            return if target_length < min_length {
+                min_length - target_length
+            } else if target_length > max_length {
+                target_length - max_length
+            } else {
+                0
+            }
+        };
+
+        let max_iterations = 500;
+
         let mut rng = rand::rng();
         let mut var_state = self.context.clone();
         Self::enforce_constraints(&mut var_state, &dependency_graph);
 
-        let mut best_length = self.calculate_max_length(&self.token, &var_state);
         let mut best_vars = var_state.clone();
-        let mut best_diff = target_length.abs_diff(best_length);
-
-        let max_iterations = 500;
+        let mut best_diff = calculate_difference_from_target(&var_state);
         let init_temp = target_length as f64;
 
         for i in 0..max_iterations {
@@ -619,19 +801,59 @@ impl ContextToken {
 
             let temp = init_temp * (1f64 - i as f64 / max_iterations as f64);
             let mut mutated_vars = var_state.clone();
-            self.mutate_variable(&mut mutated_vars, &dependency_graph.order, &mut rng);
+            Self::mutate_variable(&mut mutated_vars, &dependency_graph.order, &mut rng);
             Self::enforce_constraints(&mut mutated_vars, &dependency_graph);
+            let mutated_diff = calculate_difference_from_target(&mutated_vars);
+
+            let length_change = mutated_diff as f64 - best_diff as f64;
+            let acceptance_probability: f64 = if length_change < 0.0 { 1.0 }
+            else { (-length_change / temp).exp() };
+
+            if rng.random_range(0.0..=1.0) <= acceptance_probability {
+                var_state = mutated_vars;
+
+                if mutated_diff < best_diff {
+                    best_vars = var_state.clone();
+                    best_diff = mutated_diff;
+                }
+            }
         }
-        // TODO: finish
-        return HashMap::new();
+        return best_vars;
+    }
+
+    // applies a mutation to a random variable within a variable set, modifying one value by a random amount
+    fn mutate_variable(variables: &mut HashMap<String, i32>, names: &Vec<String>, rng: &mut ThreadRng) {
+        if names.is_empty() {
+            return;
+        }
+
+        let target_var = names.get(rng.random_range(0..names.len())).unwrap();
+        let target_value = variables.get_mut(target_var).unwrap();
+
+        // apply a random 'mutation', modifying the variable value
+        // simplified normal distribution curve with 3 steps - could also use rand_distr module instead
+        *target_value = (*target_value + match rng.random_range(0..100) {
+            0..60 => rng.random_range(-1..=1),
+            60..85 => rng.random_range(-4..=4),
+            _ => rng.random_range(-10..=10),
+        }).max(0);
     }
 
     fn calculate_max_length(&self, analysed_token: &Token, context: &HashMap<String, i32>) -> usize {
         return match analysed_token {
             Token::Literal(literal) => literal.len(),
-            Token::Repetition(repeated_token, _, upper_bound) => self.calculate_max_length(repeated_token.as_ref(), &context) * Bound::calculate_bound(upper_bound, &self.context).unwrap_or(0) as usize,
+            Token::Repetition(repeated_token, _, upper_bound) => self.calculate_max_length(repeated_token.as_ref(), &context) * Bound::calculate_bound(upper_bound, context).unwrap_or(0).max(0) as usize,
             Token::Choice(token_vec) => token_vec.iter().map(| token | self.calculate_max_length(token, &context)).max().unwrap_or(0),
             Token::Sequence(token_vec) => token_vec.iter().map(| token | self.calculate_max_length(token, &context)).sum(),
+        }
+    }
+
+    fn calculate_min_length(&self, analysed_token: &Token, context: &HashMap<String, i32>) -> usize {
+        return match analysed_token {
+            Token::Literal(literal) => literal.len(),
+            Token::Repetition(repeated_token, lower_bound, _) => self.calculate_min_length(repeated_token.as_ref(), &context) * Bound::calculate_bound(lower_bound, context).unwrap_or(0).max(0) as usize,
+            Token::Choice(token_vec) => token_vec.iter().map(| token | self.calculate_min_length(token, &context)).min().unwrap_or(0),
+            Token::Sequence(token_vec) => token_vec.iter().map(| token | self.calculate_min_length(token, &context)).sum(),
         }
     }
 
@@ -713,41 +935,75 @@ impl ContextToken {
 
     /// fixes constraints post-mutation such that all are fulfilled
     fn enforce_constraints(variables: &mut HashMap<String, i32>, dependency_graph: &DependencyGraph) {
+        let search_limit: i32 = 200;
+
+        // tracks constraints which have already been modified such that they are not modified again
+        let mut processed_vars: HashSet<String> = HashSet::new();
+
         // for each variable, ensures that all constraints are fulfilled
         for var in &dependency_graph.order {
-            let mut var_value: i32 = 0;
-            for constraint in &dependency_graph.constraints {
-                // oversimplification - assumes a max bound is equal to the variable used
-                // should work for simple cases, but complex cases may break this logic
-                if constraint.max.has_variable(var) {
-                    let min_value: i32 = constraint.min.calculate_bound(variables).unwrap_or(0);
-                    var_value = var_value.max(min_value);
+            processed_vars.insert(var.clone());
+            // for the current variable, get all constraints which involve this variable
+            let var_value: i32 = *variables.get(var).unwrap_or(&0);
+            let var_constraints: Vec<&Constraint> = dependency_graph.constraints
+                .iter()
+                .filter(|c| {
+                    let min_vars = Self::get_variables(&c.min);
+                    let max_vars = Self::get_variables(&c.max);
+
+                    // constraint should only be added if the current var is involved in it and the 
+                    // constraint has not already been solved 
+                    let var_is_relevant = min_vars.contains(var) || max_vars.contains(var);
+                    let all_vars_processed = min_vars.iter().all(| v | processed_vars.contains(v)) &&
+                        max_vars.iter().all(| v | processed_vars.contains(v));
+
+                    return var_is_relevant && all_vars_processed;
+                }).collect();
+
+            // skip if no constraints rely on this value - this var is unused
+            if var_constraints.len() == 0 {
+                continue;
+            }
+
+            // otherwise, iterate through values and find the closest value which is valid
+            let mut closest_val = var_value;
+            let mut valid_found = false;
+
+            let satisfies_constraints = | variables: &mut HashMap<String, i32>, var_constraints: &Vec<&Constraint> | -> bool {
+                let mut is_valid = true;
+                for constraint in var_constraints {
+                    let lower_bound = constraint.min.calculate_bound(variables).unwrap_or(0);
+                    let upper_bound = constraint.max.calculate_bound(variables).unwrap_or(0);
+
+                    if lower_bound > upper_bound {
+                        is_valid = false;
+                        break;
+                    }
+                }
+                return is_valid;            
+            };
+            
+            // checks based on distance from current value - always looks for closest
+            for possible_val in 0..=search_limit { 
+                let test_values = [var_value + possible_val, var_value - possible_val];
+                for value in test_values {
+                    // modifies the variable hashmap, then tests the variables. when the first valid instance
+                    // is found, exits out and accepts the found variable set
+                    variables.insert(var.clone(), value);
+                    if &value >= &0 && satisfies_constraints(variables, &var_constraints) {
+                        closest_val = value;
+                        valid_found = true;
+                        break;
+                    }
+                }
+                if valid_found {
+                    break;
                 }
             }
 
-            let current_var = *variables.get(var).unwrap_or(&0);
-            if current_var < var_value as i32 {
-                variables.insert(var.clone(), var_value);
-            }
+            // if no valid variable configuration is found, uses the original value
+            variables.insert(var.clone(), closest_val);
         }
-    }
-
-    fn mutate_variable(&self, variables: &mut HashMap<String, i32>, names: &Vec<String>, rng: &mut impl Rng) {
-        if names.is_empty() {
-            return;
-        }
-
-        // get a random variable to mutate
-        let target_var = names.get(rng.random_range(0..names.len())).unwrap();
-        let target_value = variables.get_mut(target_var).unwrap();
-
-        // apply a random 'mutation', modifying the variable value
-        // this may require later tuning - these values are not well tested
-        *target_value = (*target_value + match rng.random_range(0..100) {
-            0..60 => rng.random_range(-1..=1),
-            60..85 => rng.random_range(-4..=4),
-            _ => rng.random_range(-10..=10),
-        }).max(0);
     }
 
     /// recursively gathers constraints relating to the variables within ranges in `Token`s
