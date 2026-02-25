@@ -275,6 +275,7 @@ fn parse_single_tape_action(pair: Pair<Rule>) -> Result<Transition, TuringMachin
         write: vec![write],
         directions: vec![direction],
         next_state,
+        use_count: 0,
     })
 }
 
@@ -319,6 +320,7 @@ fn parse_multi_tape_action(pair: Pair<Rule>) -> Result<Transition, TuringMachine
         write,
         directions,
         next_state,
+        use_count: 0,
     })
 }
 
@@ -536,6 +538,7 @@ rules:
                 write: vec!['b', 'e'],
                 directions: vec![Direction::Right, Direction::Right],
                 next_state: "halt".into(),
+                use_count: 0,
             }
         );
         assert!(program.rules.contains_key("start"));

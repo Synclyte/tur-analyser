@@ -1,5 +1,7 @@
-use std::{collections::{HashMap, HashSet}, env::var, ops::Range, usize, vec};
-use rand::{Rng, rng, rngs::ThreadRng, seq::{IndexedRandom, SliceRandom}};
+use crate::{Program, Step, TuringMachineError, machine::*};
+
+use std::{collections::{HashMap, HashSet}, ops::Range, usize, vec};
+use rand::{Rng, rngs::ThreadRng, seq::{SliceRandom}};
 
 const REPEAT_LIMIT: i32 = 128;
 
@@ -7,7 +9,7 @@ const REPEAT_LIMIT: i32 = 128;
 // covers all basic regex operations 
 // essentially an AST for expanded regex
 
-#[derive(PartialEq, Clone, Eq, Hash)]
+#[derive(PartialEq, Clone, Eq, Hash, Debug)]
 enum Token {
     Literal(String),
     Repetition(Box<Token>, Bound, Bound),
@@ -31,13 +33,14 @@ enum CalcTokenType {
 }
 
 // context binding for a token AST
+#[derive(Debug)]
 struct ContextToken {
     token: Token,
     context: HashMap<String, i32>,
 }
 
 // mathematical operations - used for calculating discrete repetition `Bound` values
-#[derive(Clone, PartialEq, Eq, Hash)]
+#[derive(Clone, PartialEq, Eq, Hash, Debug)]
 enum Operation {
     Add,
     Subtract,
@@ -64,7 +67,7 @@ impl Operation {
 }
 
 // calculation tree - provides a means to calculate the value of a given mathematical expression
-#[derive(PartialEq, Eq, Hash)]
+#[derive(PartialEq, Eq, Hash, Debug)]
 enum Bound {
     Literal(i32),
     Variable(String),
@@ -547,7 +550,8 @@ impl ExpressionParser {
 
 /// designed to generate strings to a given length from a `ContextToken`, matching the inner expression
 impl ContextToken {
-    pub fn generate_strings_in_range(&self, search_range: Range<usize>) -> Vec<String> {
+    // generates strings within the search range length, potentially stopping early if max_generations has been exceeded
+    fn generate_strings_in_range(&self, search_range: Range<usize>, max_generations: usize) -> Vec<String> {
         let mut generated_strings: Vec<String> = Vec::new();
         let mut lengths_generated: HashSet<usize> = HashSet::new();
 
@@ -570,7 +574,11 @@ impl ContextToken {
                 generated_strings.push(valid_string);
                 lengths_generated.insert(generated_length);
             }
+            if lengths_generated.len() >= max_generations {
+                break;
+            }
         }
+        // returns strings in length order
         generated_strings.sort_by_key(|s| s.len());
 
         return generated_strings;
@@ -1078,6 +1086,47 @@ fn main() {
         Ok(tk) => println!("{}", ExpressionParser::get_string(&tk.token)),
         Err(er) => println!("{}", er),
     }
+}
+
+pub struct AnalysisInfo<'a> {
+    range_analysed: Range<i32>,
+    machine_string_runtimes: &'a [(&'a String, &'a TuringMachine, &'a Step)],
+}
+
+enum Complexity {
+    constant,
+    n,
+    nlogn,
+    n2,
+    n3,
+}
+
+pub fn analyse_expression(expression_string: &str, program: Program) -> Result<AnalysisInfo<'_>, String> {
+    let max_generation_length = 100;
+    let max_generations = 30;
+
+    let generated_token = ExpressionParser::produce_token(expression_string)?;
+    let generated_strings: Vec<String> = generated_token.generate_strings_in_range(0..max_generation_length, max_generations);
+
+    // collects a list of (input string, run turing machine, end state) for all strings
+    // turing machines contain information about runtime and transition runtime
+    // end state allows machines to be filtered based on whether they are assessed to terminate
+    // this allows for empirical time complexity analysis
+    let machine_runtimes: Vec<Option<(&String, TuringMachine, Step)>> = generated_strings.iter()
+        .map(|s| {
+            let mut machine = TuringMachine::new(program.clone());
+            if machine.set_tape_content(0, s).is_err() {
+                return None;
+            }
+            let exit_type = machine.run();
+            return Some((s, machine, exit_type))
+        })
+        .collect();
+
+    // through comparing the average squared error of various time complexity functions to the actual runtime functions
+    // a good estimate for time complexity of functions and transitions can be estimated
+    // accuracy increases with increased generation count
+    todo!();
 }
 
 #[cfg(test)]
@@ -1759,10 +1808,94 @@ mod tests {
             assert!(x_value <= y_value);
             assert!(x_value >= &2);
         }
+    
+        #[test]
+        fn generator_can_generate_simple_odd_range() {
+            let token = sequence(&[
+                repetition(literal("aa"), Bound::Variable("x".into()), Bound::Variable("x".into())),
+                repetition(literal("bb"), Bound::Variable("y".into()), Bound::Variable("y".into())),
+                literal("ccccc")
+            ]);
+            let context = create_context(token, &[("x", 0), ("y", 0)]);
+            let range = 0..20;
+            let generated_strings= context.generate_strings_in_range(range, 100);
+            // expects strings of length 5 + 2n: 8 in range 0..20
+            assert!(generated_strings.len() == 8);
+        }
+
+        #[test]
+        fn generator_can_generate_complex_literal_range() {
+            let token =
+            choice(&[
+                sequence(&[
+                    literal("a"),
+                    repetition(
+                        choice(&[
+                            sequence(&[
+                                repetition(literal("a"), Bound::Literal(1), Bound::Literal(2)),
+                                literal("bc")
+                            ]),
+                            repetition(literal("e"), Bound::Literal(0), Bound::Literal(1)),
+                            sequence(&[
+                                literal("gg"),
+                                choice(&[
+                                    literal("a"),
+                                    literal("b"),
+                                    choice(&[
+                                        repetition(literal("c"), Bound::Literal(3), Bound::Literal(3)),
+                                        repetition(literal("d"), Bound::Literal(1), Bound::Literal(3))
+                                    ])
+                                ])
+                            ])
+                        ]), Bound::Literal(1), Bound::Literal(2)
+                    ),
+                ]),
+                literal("abc")
+            ]);
+
+            let context = create_context(token, &[]);
+            let range = 0..40;
+            let generated_strings= context.generate_strings_in_range(range, 100);
+
+            assert!(generated_strings.len() == 11);
+        }
+
+        #[test]
+        fn generator_can_generate_complex_mixed_range() {
+            let token =
+            choice(&[
+                sequence(&[
+                    literal("a"),
+                    repetition(
+                        choice(&[
+                            sequence(&[
+                                repetition(literal("a"), Bound::Variable("x".into()), Bound::Literal(4)),
+                                literal("bc")
+                            ]),
+                            repetition(literal("e"), Bound::Variable("x".into()), Bound::Variable("y".into())),
+                            sequence(&[
+                                literal("gg"),
+                                choice(&[
+                                    literal("a"),
+                                    literal("b"),
+                                    choice(&[
+                                        repetition(literal("c"), Bound::Literal(1), Bound::Variable("z".into())),
+                                        repetition(literal("d"), Bound::Variable("x".into()), Bound::Calculation(Box::new(Bound::Literal(2)), Operation::Add, Box::new(Bound::Variable("z".into()))))
+                                    ])
+                                ])
+                            ])
+                        ]), Bound::Literal(1), Bound::Literal(2)
+                    ),
+                ]),
+                literal("abc")
+            ]);
+
+            let context = create_context(token, &[("x", 0), ("y", 0), ("z", 0)]);
+            let range = 0..40;
+            let generated_strings= context.generate_strings_in_range(range, 100);
+            
+            // able to generate all lengths but length 2
+            assert!(generated_strings.len() == 38);
+        }
     }
-}
-
-
-mod benchmarks {
-
 }

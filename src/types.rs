@@ -92,6 +92,7 @@ pub struct Transition {
     pub directions: Vec<Direction>,
     /// The next state the machine transitions to.
     pub next_state: String,
+    pub use_count: usize,
 }
 
 /// Represents the possible directions a Turing Machine head can move.
@@ -181,6 +182,7 @@ mod tests {
             write: vec!['X'],
             directions: vec![Direction::Right],
             next_state: "q1".to_string(),
+            use_count: 0,
         };
 
         assert_eq!(transition.write, vec!['X']);

@@ -257,6 +257,7 @@ fn decode_rules(
             write: vec![output_symbol],
             directions: vec![direction],
             next_state,
+            use_count: 0,
         };
 
         rules
@@ -295,6 +296,7 @@ mod tests {
                 write: vec!['b'],
                 directions: vec![Direction::Right],
                 next_state: "s2".to_string(),
+                use_count: 0,
             }],
         );
 
@@ -306,6 +308,7 @@ mod tests {
                 write: vec!['b'],
                 directions: vec![Direction::Right],
                 next_state: "halt".to_string(),
+                use_count: 0,
             }],
         );
 
@@ -415,12 +418,14 @@ mod tests {
                     write: vec!['b'],
                     directions: vec![Direction::Right],
                     next_state: "s2".to_string(),
+                    use_count: 0,
                 },
                 Transition {
                     read: vec!['b'],
                     write: vec!['b'],
                     directions: vec![Direction::Right],
                     next_state: "s2".to_string(),
+                    use_count: 0,
                 },
             ],
         );

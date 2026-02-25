@@ -63,7 +63,7 @@ impl TuringMachine {
         }
 
         // Find matching transition
-        let transition = match self.transition().cloned() {
+        let mut transition = match self.transition().cloned() {
             Some(t) => t,
             None => {
                 // No transition found for the current symbols.
@@ -110,6 +110,7 @@ impl TuringMachine {
 
         self.state = transition.next_state.clone();
         self.step_count += 1;
+        transition.use_count += 1;
 
         Step::Continue
     }
@@ -317,6 +318,7 @@ mod multi_tape_tests {
                 write: vec!['b', 'y'],
                 directions: vec![Direction::Right, Direction::Right],
                 next_state: "halt".to_string(),
+                use_count: 0,
             }],
         );
 
@@ -454,6 +456,7 @@ mod multi_tape_tests {
                 write: vec!['b', 'y'],
                 directions: vec![Direction::Stay, Direction::Right],
                 next_state: "halt".to_string(),
+                use_count: 0,
             }],
         );
         rules.insert("halt".to_string(), Vec::new());
