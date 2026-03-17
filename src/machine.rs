@@ -2,6 +2,8 @@
 //! multi-tape Turing Machine. It handles the machine's state, tape operations, head movements,
 //! and execution of transition rules.
 
+use std::collections::HashMap;
+
 use crate::types::{
     Direction, Halt, Mode, Program, Step, Transition, TuringMachineError, INPUT_BLANK_SYMBOL,
     MAX_EXECUTION_STEPS,
@@ -19,6 +21,7 @@ pub struct TuringMachine {
     blank: char,
     program: Program,
     step_count: usize,
+    transition_steps: HashMap<String, usize>,
 }
 
 impl TuringMachine {
@@ -38,7 +41,16 @@ impl TuringMachine {
             blank: program.blank,
             program,
             step_count: 0,
+            transition_steps: HashMap::new(),
         }
+    }
+
+    pub fn get_program(&self) -> &Program {
+        return &self.program;
+    }
+
+    pub fn get_transition_steps(&self) -> &HashMap<String, usize> {
+        return &self.transition_steps;
     }
 
     /// Executes a single step of the Turing Machine's computation.
@@ -110,7 +122,8 @@ impl TuringMachine {
 
         self.state = transition.next_state.clone();
         self.step_count += 1;
-        transition.use_count += 1;
+        let times_visited: &usize = self.transition_steps.get(self.state()).unwrap_or(&0usize);
+        self.transition_steps.insert(self.state().into(), times_visited + 1);
 
         Step::Continue
     }
@@ -317,8 +330,7 @@ mod multi_tape_tests {
                 read: vec!['a', 'x'],
                 write: vec!['b', 'y'],
                 directions: vec![Direction::Right, Direction::Right],
-                next_state: "halt".to_string(),
-                use_count: 0,
+                next_state: "halt".to_string()
             }],
         );
 
@@ -455,8 +467,7 @@ mod multi_tape_tests {
                 read: vec!['a', 'x'],
                 write: vec!['b', 'y'],
                 directions: vec![Direction::Stay, Direction::Right],
-                next_state: "halt".to_string(),
-                use_count: 0,
+                next_state: "halt".to_string()
             }],
         );
         rules.insert("halt".to_string(), Vec::new());

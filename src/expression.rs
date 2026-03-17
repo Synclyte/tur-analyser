@@ -1,7 +1,7 @@
-use crate::{Program, Step, TuringMachineError, machine::*};
+use crate::{Program, Step, Transition, TuringMachineError, machine::*};
 
-use std::{collections::{HashMap, HashSet}, ops::Range, usize, vec};
-use rand::{Rng, rngs::ThreadRng, seq::{SliceRandom}};
+use std::{collections::{HashMap, HashSet}, f64::consts::E, ops::Range, usize, vec};
+use rand::{Rng, rngs::{ThreadRng, StdRng}, seq::{SliceRandom}, SeedableRng};
 
 const REPEAT_LIMIT: i32 = 128;
 
@@ -439,60 +439,6 @@ impl ExpressionParser {
         }
     }
 
- /*    // left to right, multiplication then add/subtract
-    fn parse_arithmetic_expression(&mut self, expression: &String) -> Result<Bound, String> {
-        if expression.is_empty() {
-            return Err("Range expression is invalid - operators must have two arguments".into());
-        }
-
-        let mult_location: usize = expression.find("*").unwrap_or_else(|| usize::MAX);
-        let add_location: usize = expression.find("+").unwrap_or_else(|| usize::MAX);
-        let sub_location: usize = expression.find("-").unwrap_or_else(|| usize::MAX);
-
-        // handles operations first
-        if mult_location != usize::MAX {
-            return self.get_calculation(expression, mult_location, Operation::Multiply)
-        }
-        else if add_location != usize::MAX || sub_location != usize::MAX {
-            if sub_location <= add_location {
-                return self.get_calculation(expression, sub_location, Operation::Subtract);
-            }
-            else {
-                return self.get_calculation(expression, add_location, Operation::Add);
-            }
-        }
-        
-        // handles variables
-        if expression.len() == 1 {
-            let first_char = expression.chars().nth(0).unwrap();
-            if first_char >= 'a' && first_char <= 'z' {
-                let char_string: String = first_char.to_string();
-                self.context.insert(char_string.clone(), 0);
-                return Ok(Bound::Variable(char_string));
-            }
-        }
-        // handles literals
-        let parsed_literal = expression.parse::<i32>();
-        return match parsed_literal {
-            Ok(literal) => Ok(Bound::Literal(literal)),
-            Err(_) => Err(format!("Error: Range literal ('{}') could not be parsed", expression)),
-        }
-    } 
-    
-    /// helper method for parse_arithmetic_expression - creates a Bound::Calculation from a string containing an operation
-    fn get_calculation(&mut self, expression: &String, split_index: usize, operation_type: Operation) -> Result<Bound, String> {
-        let (first, remainder) = expression.split_at(split_index);
-        let last = &remainder[1..];
-
-        return Ok(Bound::Calculation(
-            Box::new(self.parse_arithmetic_expression(&first.to_string())?),
-            operation_type,
-            Box::new(self.parse_arithmetic_expression(&last.to_string())?)
-        ))
-    }
-
-    */
-
     /// * produces a `Token::Repetition` from a generic repetition (either special chars (*, +, ?), or a discrete repetition bounded by {})
     /// * processes a given `Vec<char>` to construct this repetition, removing used characters
     fn parse_repetition(&mut self, token: Token, c_vec: &Vec<char>, mut index: usize) -> Result<(Token, usize), String> {
@@ -550,8 +496,13 @@ impl ExpressionParser {
 
 /// designed to generate strings to a given length from a `ContextToken`, matching the inner expression
 impl ContextToken {
-    // generates strings within the search range length, potentially stopping early if max_generations has been exceeded
     fn generate_strings_in_range(&self, search_range: Range<usize>, max_generations: usize) -> Vec<String> {
+        let mut rng = rand::rng();
+        self.generate_seeded_strings_in_range(search_range, max_generations, &mut rng)
+    }
+
+    // generates strings within the search range length, potentially stopping early if max_generations has been exceeded
+    fn generate_seeded_strings_in_range<T: Rng>(&self, search_range: Range<usize>, max_generations: usize, rng: &mut T) -> Vec<String> {
         let mut generated_strings: Vec<String> = Vec::new();
         let mut lengths_generated: HashSet<usize> = HashSet::new();
 
@@ -560,8 +511,8 @@ impl ContextToken {
         let dependency_graph = self.get_dependency_graph();
 
         for target_length in search_range.clone() {
-            let valid_vars = self.get_valid_variable_values(target_length, &dependency_graph);
-            let generated_string = self.generate_string_to_length(&self.token, &valid_vars, target_length.clone());
+            let valid_vars = self.get_valid_variable_values(target_length, &dependency_graph, rng);
+            let generated_string = self.generate_string_to_length(&self.token, &valid_vars, target_length.clone(), rng);
             let valid_string = if let Some(inner_string) = generated_string {
                 inner_string
             } else {
@@ -587,19 +538,17 @@ impl ContextToken {
     // get all lengths possible by each token (get_possible_token_lengths, recursive DP-based generator)
     // reject instantly if this is not possible
     // or generate through backtracking from possible lengths. should always produce a correct string of length n
-    fn generate_string_to_length(&self, token: &Token, variables: &HashMap<String, i32>, target_length: usize) -> Option<String> {
+    fn generate_string_to_length<T: Rng>(&self, token: &Token, variables: &HashMap<String, i32>, target_length: usize, rng: &mut T) -> Option<String> {
         // gets all token lengths for this input and builds the length HashSet cache
         let possible_lengths=  self.get_possible_token_lengths(token, variables, target_length);
         if !possible_lengths.contains(&target_length) {
             return None;
         }
         
-        self.generate_exact_length_string(token, variables, target_length, target_length)
+        self.generate_exact_length_string(token, variables, target_length, target_length, rng)
     }
 
-    fn generate_exact_length_string(&self, token: &Token, variables: &HashMap<String, i32>, target_length: usize, length_limit: usize) -> Option<String> {
-        let mut rng = rand::rng();
-
+    fn generate_exact_length_string<T: Rng>(&self, token: &Token, variables: &HashMap<String, i32>, target_length: usize, length_limit: usize, rng: &mut T) -> Option<String> {
         match token {
             Token::Literal(literal) => if literal.len() == target_length {
                 Some(literal.clone())
@@ -615,8 +564,14 @@ impl ContextToken {
                     return None;
                 }
 
-                let choice = valid_choices[rng.random_range(0..valid_choices.len())];
-                self.generate_exact_length_string(choice, variables, target_length, length_limit)
+                // ensures that a single failure will not cause generation to be abandoned
+                valid_choices.shuffle(rng);
+                for choice in valid_choices {
+                    if let Some(generated_string) = self.generate_exact_length_string(choice, variables, target_length, length_limit, rng) {
+                        return Some(generated_string);
+                    }
+                }
+                None
             },
             Token::Repetition(repetition_token, lower_bound, upper_bound) => {
                 let lower_result = lower_bound.calculate_bound(variables).unwrap_or(0).max(0) as usize;
@@ -640,24 +595,24 @@ impl ContextToken {
                 let mut valid_repetitions: Vec<usize> = (lower_result..=upper_result)
                     .filter(| count | min_length * count <= target_length)
                     .collect();
-                valid_repetitions.shuffle(&mut rng);
+                valid_repetitions.shuffle(rng);
 
                 for repetition_count in valid_repetitions {
                     // form a sequence token instead, have this be solved by the sequence solver
                     let sequence_token = Token::Sequence(vec![repetition_token.as_ref().clone(); repetition_count]);
-                    if let Some(valid_string) = self.generate_exact_length_string(&sequence_token, variables, target_length, length_limit) {
+                    if let Some(valid_string) = self.generate_exact_length_string(&sequence_token, variables, target_length, length_limit, rng) {
                         return Some(valid_string);
                     }
                 }
                 None
             },
             Token::Sequence(tokens) => {
-                self.generate_valid_sequence_partition(tokens, variables, 0, target_length, length_limit)
+                self.generate_valid_sequence_partition(tokens, variables, 0, target_length, length_limit, rng)
             }
         }
     }
 
-    fn generate_valid_sequence_partition(&self, tokens: &[Token], variables: &HashMap<String, i32>, index: usize, remaining_length: usize, length_limit: usize) -> Option<String> {
+    fn generate_valid_sequence_partition<T: Rng>(&self, tokens: &[Token], variables: &HashMap<String, i32>, index: usize, remaining_length: usize, length_limit: usize, mut rng: &mut T) -> Option<String> {
         // recursive exit case
         if index == tokens.len() {
             if remaining_length == 0 {
@@ -674,8 +629,10 @@ impl ContextToken {
             .filter(|&l| l <= remaining_length)
             .collect();
 
-        let mut rng = rand::rng();
-        possible_token_lengths.shuffle(&mut rng);
+        // requires sorting before shuffle to ensure that the hashmap is ordered deterministically
+        // without this, the seed is essentially ignored
+        possible_token_lengths.sort_unstable();
+        possible_token_lengths.shuffle(rng);
 
         let next_tokens: Vec<Token> = tokens.iter().skip(index + 1).cloned().collect();
         let sequence_remainder = if !next_tokens.is_empty() {
@@ -702,9 +659,9 @@ impl ContextToken {
             }
 
             // recursively generate the rest of this partition
-            if let Some(partition_remainder) = self.generate_valid_sequence_partition(tokens, variables, index + 1, partition_length, length_limit) {
+            if let Some(partition_remainder) = self.generate_valid_sequence_partition(tokens, variables, index + 1, partition_length, length_limit, rng) {
                 // if the rest of the partition can be valid, generate the current part
-                if let Some(generated_partition) = self.generate_exact_length_string(current_token, variables, possible_length, length_limit) {
+                if let Some(generated_partition) = self.generate_exact_length_string(current_token, variables, possible_length, length_limit, rng) {
                     return Some(generated_partition + &partition_remainder);
                 }
             }
@@ -797,7 +754,7 @@ impl ContextToken {
     }
 
     /// uses an annealing-based approach to find valid variables based on constraints
-    fn get_valid_variable_values(&self, target_length: usize, dependency_graph: &DependencyGraph) -> HashMap<String, i32> {
+    fn get_valid_variable_values<T: Rng>(&self, target_length: usize, dependency_graph: &DependencyGraph, mut rng: &mut T) -> HashMap<String, i32> {
         // gets the difference between the min/max lengths and the target value
         let calculate_difference_from_target = | variables: &HashMap<String, i32> | -> usize {
             let min_length = self.calculate_min_length(&self.token, variables);
@@ -815,7 +772,6 @@ impl ContextToken {
         // estimation of iterations necessary - not a great heuristic and may require tweaking, but more performant than nothing
         let max_iterations = 300 + dependency_graph.order.len() * 400;
 
-        let mut rng = rand::rng();
         let mut var_state = self.context.clone();
         Self::enforce_constraints(&mut var_state, &dependency_graph);
 
@@ -836,7 +792,7 @@ impl ContextToken {
 
             let temp = init_temp * (1f64 - i as f64 / max_iterations as f64);
             let mut mutated_vars = var_state.clone();
-            Self::mutate_variable(&mut mutated_vars, &dependency_graph.order, &mut rng);
+            Self::mutate_variable(&mut mutated_vars, &dependency_graph.order, rng);
             Self::enforce_constraints(&mut mutated_vars, &dependency_graph);
             let mutated_diff = calculate_difference_from_target(&mutated_vars);
 
@@ -857,7 +813,13 @@ impl ContextToken {
     }
 
     // applies a mutation to a random variable within a variable set, modifying one value by a random amount
-    fn mutate_variable(variables: &mut HashMap<String, i32>, names: &Vec<String>, rng: &mut ThreadRng) {
+    fn mutate_variable<T: Rng>(variables: &mut HashMap<String, i32>, names: &Vec<String>, rng: &mut T) {
+        let distribute_randomly = | generators: i32, value_range: i32, rng: &mut T | {
+            let mut sum = 0;
+            for _ in 0..generators { sum += rng.random_range(0..value_range); }
+            return sum - ((value_range - 1) * generators) / 2;
+        };
+
         if names.is_empty() {
             return;
         }
@@ -866,12 +828,8 @@ impl ContextToken {
         let target_value = variables.get_mut(target_var).unwrap();
 
         // apply a random 'mutation', modifying the variable value
-        // simplified normal distribution curve with 3 steps - could also use rand_distr module instead
-        *target_value = (*target_value + match rng.random_range(0..100) {
-            0..60 => rng.random_range(-1..=1),
-            60..85 => rng.random_range(-3..=3),
-            _ => rng.random_range(-6..=6),
-        }).max(0);
+        // essentially uses dice rolls to cheaply simulate an inverse normal distribution
+        *target_value = (*target_value + distribute_randomly(3, 7, rng) / 2).max(0);
     }
 
     // simple recursive max length calculator
@@ -891,27 +849,6 @@ impl ContextToken {
             Token::Choice(token_vec) => token_vec.iter().map(| token | self.calculate_min_length(token, &context)).min().unwrap_or(0),
             Token::Sequence(token_vec) => token_vec.iter().map(| token | self.calculate_min_length(token, &context)).sum(),
         }
-    }
-
-    fn calculate_max_bound(&self, token: &Token, context: &HashMap<String, i32>) -> Bound {
-        return match token {
-            Token::Literal(lit) => Bound::Literal(lit.len() as i32),
-            Token::Repetition(inner_token, _, upper) => Bound::Calculation(Box::new(self.calculate_max_bound(inner_token.as_ref(), &context)), Operation::Multiply, Box::new(upper.clone())),
-            Token::Choice(choices) => self.calculate_max_bound(choices.iter()
-                .max_by_key(| choice | self.calculate_max_length(*choice, &context))
-                .unwrap_or(&Token::Literal("".to_string())), &context),
-            Token::Sequence(sequence) => match sequence.len() {
-                0 => Bound::Literal(0),
-                1 => self.calculate_max_bound(sequence.first().unwrap(), &context),
-                _ => {
-                    let mut result: Bound = Bound::Literal(0);
-                    for i in 0..sequence.len() {
-                        result = Bound::Calculation(Box::new(result), Operation::Add, Box::new(self.calculate_max_bound(sequence.get(i).unwrap(), &context)));
-                    }
-                    result
-                }
-            }
-        }        
     }
 
     /// implementation of Kahn's algorithm (topological sorting) https://en.wikipedia.org/wiki/Topological_sorting#Kahn's_algorithm
@@ -958,9 +895,13 @@ impl ContextToken {
             }
         }
 
+        // ensures determinism of hashmaps so seeds are not ignored
+        let mut sorted_elements: Vec<String> = elements.into_iter().collect();
+        sorted_elements.sort();
+
         // some elements will not work with this, as this algorithm assumes a DAG is input
         // therefore, for cycles, an arbitrary order must be given
-        for cyclic_element in elements {
+        for cyclic_element in sorted_elements {
             if !order.contains(&cyclic_element) {
                 order.push(cyclic_element);
             }
@@ -1088,45 +1029,156 @@ fn main() {
     }
 }
 
-pub struct AnalysisInfo<'a> {
-    range_analysed: Range<i32>,
-    machine_string_runtimes: &'a [(&'a String, &'a TuringMachine, &'a Step)],
+pub struct AnalysisInfo {
+    estimated_complexity: Complexity,
+    estimated_state_complexities: HashMap<String, Complexity>,
 }
 
+#[derive(Debug, Clone)]
+// could add more. each just needs a corresponding complexity function definition, but the more there are the higher the chance of an incorrect classification
+// due to the impact of lesser terms
 enum Complexity {
-    constant,
-    n,
-    nlogn,
-    n2,
-    n3,
+    Constant,
+    N,
+    Nlogn,
+    N2,
+    N2logn,
+    N3,
+    Exp,
 }
 
-pub fn analyse_expression(expression_string: &str, program: Program) -> Result<AnalysisInfo<'_>, String> {
+impl Complexity {
+    fn get_complexity_function(&self) -> Box<dyn Fn(usize) -> f64> {
+        match self {
+            Complexity::Constant => Box::new(| _: usize | 1f64),
+            Complexity::N => Box::new(| n: usize | n as f64),
+            Complexity::Nlogn => Box::new(| n: usize | {
+                let x: f64 = n as f64;
+                x * x.log2()
+            }),
+            Complexity::N2 => Box::new(| n: usize | (n.pow(2)) as f64),
+            Complexity::N2logn => Box::new(| n: usize | {
+                let x: f64 = n as f64;
+                x.powi(2) * x.log2()
+            }),
+            Complexity::N3 => Box::new(| n: usize | (n.pow(3)) as f64),
+            Complexity::Exp => Box::new(| n: usize | E.powi(n as i32)),
+        }
+    }
+
+    fn generate_to_range(&self, range: Range<usize>) -> Vec<(usize, f64)> {
+        let complexity_function = self.get_complexity_function();
+        let mut result: Vec<(usize, f64)> = Vec::new();
+
+        for i in range {
+            let point = (i, complexity_function(i));
+            result.push(point);
+        }
+
+        result
+    }
+}
+
+pub fn analyse_expression(expression_string: &str, program: Program) -> Result<AnalysisInfo, String> {
     let max_generation_length = 100;
     let max_generations = 30;
 
     let generated_token = ExpressionParser::produce_token(expression_string)?;
     let generated_strings: Vec<String> = generated_token.generate_strings_in_range(0..max_generation_length, max_generations);
 
-    // collects a list of (input string, run turing machine, end state) for all strings
+    // collects a list of (input string, run turing machine, end state) for all strings by running turing machines
     // turing machines contain information about runtime and transition runtime
     // end state allows machines to be filtered based on whether they are assessed to terminate
     // this allows for empirical time complexity analysis
-    let machine_runtimes: Vec<Option<(&String, TuringMachine, Step)>> = generated_strings.iter()
-        .map(|s| {
+    let machine_runtimes: Vec<(&String, TuringMachine, Step)> = generated_strings.iter()
+        .filter_map(|s| {
             let mut machine = TuringMachine::new(program.clone());
             if machine.set_tape_content(0, s).is_err() {
                 return None;
             }
             let exit_type = machine.run();
-            return Some((s, machine, exit_type))
+            Some((s, machine, exit_type))
         })
         .collect();
+
+    if machine_runtimes.is_empty() {
+        return Err("Failed to simulate Turing Machine - no valid outputs found".into());
+    }
 
     // through comparing the average squared error of various time complexity functions to the actual runtime functions
     // a good estimate for time complexity of functions and transitions can be estimated
     // accuracy increases with increased generation count
-    todo!();
+    let mut total_runtimes: Vec<(usize, usize)> = machine_runtimes.iter()
+        .map(| (input_string, machine, _) | (input_string.len(), machine.step_count()))
+        .collect();
+
+    let estimated_complexity = estimate_complexity(&mut total_runtimes);
+
+    // encode state runtimes in a hashmap mapping state name -> (input length, state runtime)
+    let mut state_runtimes: HashMap<String, Vec<(usize, usize)>> = HashMap::new();
+
+    // fully populates state runtimes
+    for (input_string, machine, _) in machine_runtimes {
+        let length: usize = input_string.len();
+        let transition_steps: &HashMap<String, usize> = machine.get_transition_steps();
+        for state_name in machine.get_program().rules.keys() {
+            let steps = transition_steps.get(state_name).copied().unwrap_or(0);
+            // produces a new Vec<(usize, usize)> if empty, and adds the (length, steps) pair to it
+            state_runtimes.entry(state_name.clone())
+                .or_default()
+                .push((length, steps));
+        }
+    }
+
+    let mut state_complexities: HashMap<String, Complexity> = HashMap::new();
+    for (state_name, mut runtimes) in state_runtimes {
+        let state_complexity = estimate_complexity(&mut runtimes);
+        state_complexities.insert(state_name, state_complexity);
+    }
+
+    Ok(AnalysisInfo {
+        estimated_complexity: estimated_complexity, 
+        estimated_state_complexities: state_complexities 
+    })
+}
+
+fn estimate_complexity(machine_points: &mut Vec<(usize, usize)>) -> Complexity {
+    machine_points.sort_by_key(|&(index, _)| index);
+
+    let complexities: Vec<Complexity> = vec![Complexity::Constant, Complexity::N, Complexity::Nlogn, Complexity::N2, Complexity::N2logn, Complexity::N3, Complexity::Exp];
+    let mut best_complexity = Complexity::Constant;
+    let mut best_error = f64::MAX;
+
+    for complexity in complexities {
+        let complexity_function = complexity.get_complexity_function();
+
+        // calculate B value for given complexity
+        let mut xy: f64 = 0f64;
+        let mut xx: f64 = 0f64;
+        for &(index, value) in machine_points.iter() {
+            let x = complexity_function(index.clone());
+            let y = value as f64;
+
+            xy += x * y;
+            xx += x * x;
+        }
+
+        // get least squares b estimation through B = (X * Y) / (X * X)
+        let b = xy / xx;
+
+        // now use residual sum of squares to get squared error against initial machine points
+        let mut residual_sum: f64 = 0f64;
+        for &(index, value) in machine_points.iter() {
+            residual_sum += (value as f64 - b * complexity_function(index)).powi(2);
+        }
+
+        if residual_sum < best_error {
+            best_error = residual_sum;
+            best_complexity = complexity;
+        }
+    }
+
+    best_complexity
 }
 
 #[cfg(test)]
@@ -1665,7 +1717,7 @@ mod tests {
             ]);
             let context = create_context(token, &[]);
             let target_length = 7;
-            let result = context.generate_exact_length_string(&context.token, &context.context, target_length, target_length);
+            let result = context.generate_exact_length_string(&context.token, &context.context, target_length, target_length, &mut StdRng::seed_from_u64(0u64));
             assert!(result.is_none());
         }
 
@@ -1677,7 +1729,8 @@ mod tests {
             ]);
             let context = create_context(token, &[]);
             let target_length = 1;
-            let result = context.generate_exact_length_string(&context.token, &context.context, target_length, target_length);
+            let mut rng = StdRng::seed_from_u64(0);
+            let result = context.generate_exact_length_string(&context.token, &context.context, target_length, target_length, &mut rng);
             assert!(result.is_none());
         }
 
@@ -1689,7 +1742,8 @@ mod tests {
             ]);
             let context = create_context(token, &[]);
             let target_length = 4;
-            let result = context.generate_exact_length_string(&context.token, &context.context, target_length, target_length).unwrap();
+            let mut rng = StdRng::seed_from_u64(0);
+            let result = context.generate_exact_length_string(&context.token, &context.context, target_length, target_length, &mut rng).unwrap();
             assert_eq!(result.len(), target_length);
         }
 
@@ -1701,7 +1755,8 @@ mod tests {
             ]);
             let context = create_context(token, &[]);
             let target_length = 8;
-            let result = context.generate_exact_length_string(&context.token, &context.context, target_length, target_length).unwrap();
+            let mut rng = StdRng::seed_from_u64(0);
+            let result = context.generate_exact_length_string(&context.token, &context.context, target_length, target_length, &mut rng).unwrap();
             assert_eq!(result, "aaaabbbb".to_string());
         }
 
@@ -1717,10 +1772,11 @@ mod tests {
             let mut results: HashSet<String> = HashSet::new();
             let dependency_graph = context.get_dependency_graph();
 
+            let mut rng = StdRng::seed_from_u64(0);
             for _ in 0..10 {
-                let valid_variables = context.get_valid_variable_values(target_length, &dependency_graph);
+                let valid_variables = context.get_valid_variable_values(target_length, &dependency_graph, &mut rng);
                 // the annealing-based solver can fail due to being random - not every iteration may have a solution
-                if let Some(generated_string) = context.generate_exact_length_string(&context.token, &valid_variables, target_length, target_length) {
+                if let Some(generated_string) = context.generate_exact_length_string(&context.token, &valid_variables, target_length, target_length, &mut rng) {
                     results.insert(generated_string);
                 }
             }
@@ -1740,7 +1796,8 @@ mod tests {
             let target_length = 10;
 
             let dependency_graph = context.get_dependency_graph();
-            let value_map = context.get_valid_variable_values(target_length as usize, &dependency_graph);
+            let mut rng = StdRng::seed_from_u64(0);
+            let value_map = context.get_valid_variable_values(target_length as usize, &dependency_graph, &mut rng);
             
             let expected_x = target_length / 2 as i32;
             assert_eq!(value_map.get("x").unwrap(), &expected_x);
@@ -1758,7 +1815,8 @@ mod tests {
             let target_length = 10;
 
             let dependency_graph = context.get_dependency_graph();
-            let value_map = context.get_valid_variable_values(target_length as usize, &dependency_graph);
+            let mut rng = StdRng::seed_from_u64(0);
+            let value_map = context.get_valid_variable_values(target_length as usize, &dependency_graph, &mut rng);
 
             let x_value = value_map.get("x").unwrap();
             let y_value = value_map.get("y").unwrap();
@@ -1781,7 +1839,8 @@ mod tests {
             let target_length = 10;
 
             let dependency_graph = context.get_dependency_graph();
-            let value_map = context.get_valid_variable_values(target_length as usize, &dependency_graph);
+            let mut rng = StdRng::seed_from_u64(0);
+            let value_map = context.get_valid_variable_values(target_length as usize, &dependency_graph, &mut rng);
             
             let x_value = value_map.get("x").unwrap();
 
@@ -1897,5 +1956,47 @@ mod tests {
             // able to generate all lengths but length 2
             assert!(generated_strings.len() == 38);
         }
+    }
+}
+
+mod benchmarks {
+    use super::*;
+    use std::time::Instant;
+
+    fn benchmark_input(input_str: &str, generation_range: Range<usize>, benchmark_name: &str) {
+        let max_generations = 100;
+        let mut rng = StdRng::seed_from_u64(0);
+
+        let start = Instant::now();
+        let token = ExpressionParser::produce_token(input_str).unwrap();
+        let generated_strings = token.generate_seeded_strings_in_range(generation_range.clone(), max_generations, &mut rng);
+        let elapsed = Instant::now() - start;
+
+        println!("Benchmark '{}'\nInput String: {}\nTime Elapsed: {:<7?}\nSearch Range: {}..{}\nStrings Generated: {}\n", benchmark_name, input_str, elapsed, generation_range.start, generation_range.end, generated_strings.len())
+    }
+
+    #[test]
+    fn simple_string() {
+        benchmark_input("a{,}", 0..100, "Simple Linear Regex");
+    }
+
+    #[test]
+    fn choice_nonatomic_string() {
+        benchmark_input("(aaa|bbbbb){,}", 0..50, "Simple Non-Atomic String");
+    }
+
+    #[test]
+    fn simple_variable_bound_string() {
+        benchmark_input("a{x}b{x}", 0..50, "Simple Variable-Bounded String");
+    }
+
+    #[test]
+    fn complex_variable_bound_string() {
+        benchmark_input("(a{3x, y + 5 + z - x}(b|c){y, 6x}){x - z}", 0..50, "Complex Variable-Bounded String");
+    }
+
+    #[test]
+    fn complex_choice_string() {
+        benchmark_input("((((a|b|c|d|e){5})|fff){2})|g{, 10}", 0..50, "Complex Choice String");
     }
 }

@@ -82,7 +82,7 @@ impl Program {
 ///
 /// A transition defines how the machine behaves when it is in a certain state
 /// and reads specific symbols from its tapes.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Hash)]
 pub struct Transition {
     /// A vector of characters to be read from each tape.
     pub read: Vec<char>,
@@ -91,12 +91,11 @@ pub struct Transition {
     /// A vector of directions for each tape's head to move after the transition.
     pub directions: Vec<Direction>,
     /// The next state the machine transitions to.
-    pub next_state: String,
-    pub use_count: usize,
+    pub next_state: String
 }
 
 /// Represents the possible directions a Turing Machine head can move.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Hash)]
 pub enum Direction {
     /// Move the head one position to the left.
     Left,
@@ -181,8 +180,7 @@ mod tests {
             read: vec!['A'],
             write: vec!['X'],
             directions: vec![Direction::Right],
-            next_state: "q1".to_string(),
-            use_count: 0,
+            next_state: "q1".to_string()
         };
 
         assert_eq!(transition.write, vec!['X']);
