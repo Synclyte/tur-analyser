@@ -3,6 +3,7 @@ mod program_editor;
 mod program_selector;
 mod share_button;
 mod tape_view;
+mod analyser;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum MachineState {
@@ -15,3 +16,4 @@ pub use program_editor::ProgramEditor;
 pub use program_selector::ProgramSelector;
 pub use share_button::ShareButton;
 pub use tape_view::TapeView;
+pub use analyser::ComplexityAnalyser;

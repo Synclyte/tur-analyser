@@ -398,7 +398,6 @@ mod tests {
             write: vec![write],
             directions: vec![direction],
             next_state: next_state.to_string(),
-            use_count: 0,
         }
     }
 
@@ -619,7 +618,6 @@ mod tests {
                 write: vec!['b', 'y'],
                 directions: vec![Direction::Right, Direction::Right],
                 next_state: "halt".to_string(),
-                use_count: 0,
             }],
         );
         rules.insert("halt".to_string(), Vec::new());

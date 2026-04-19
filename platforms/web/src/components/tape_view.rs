@@ -1,5 +1,5 @@
 use crate::components::MachineState;
-use yew::{function_component, html, Callback, Event, Html, Properties, TargetCast};
+use yew::{function_component, html, Callback, Event, Html, Properties, TargetCast, InputEvent};
 
 #[derive(Properties, PartialEq)]
 pub struct TapeViewProps {
@@ -19,6 +19,8 @@ pub struct TapeViewProps {
     pub on_speed_change: Callback<u64>,
     pub tape_left_offsets: Vec<usize>,
     pub message: String,
+    pub on_toggle_analysis: Callback<()>,
+    pub show_analysis: bool,
 }
 
 #[function_component(TapeView)]
@@ -26,57 +28,71 @@ pub fn tape_view(props: &TapeViewProps) -> Html {
     let cell_width = 42; // Width of each cell (no gap)
     let padding_cells = 15; // Number of blank cells to show on each side for infinite tape effect
 
-    let on_speed_change = props.on_speed_change.clone();
     let is_machine_running = props.machine_state == MachineState::Running;
+    let current_speed = (500f64 / props.speed as f64).log2().round() as i32;
+    let on_speed_input = {
+        let on_speed_change = props.on_speed_change.clone();
+        Callback::from(move |e: InputEvent| {
+            let input = e.target_unchecked_into::<web_sys::HtmlInputElement>();
+            if let Ok(v) = input.value().parse::<i32>() {
+                let multiplier = 2f64.powi(v);
+                let delay = (500f64 / multiplier).max(1.0) as u64;
+                on_speed_change.emit(delay);
+            }
+        })
+    };
 
     html! {
         <div class="tape-view">
             <div class="tape-header">
                 <h3 class="card-title">{"Tapes"}</h3>
-                <div class="tape-controls">
-                    <button
-                        class="btn btn-primary"
-                        onclick={props.on_step.reform(|_| ())}
-                        disabled={!is_machine_running || !props.is_program_ready}
-                    >
-                        {"Step"}
-                    </button>
-                    <button
-                        class="btn btn-secondary"
-                        onclick={props.on_reset.reform(|_| ())}
-                        disabled={!props.is_program_ready}
-                    >
-                        {"Reset"}
-                    </button>
-                    <button
-                        class={format!("btn {}", if props.auto_play { "btn-warning" } else { "btn-success" })}
-                        onclick={props.on_toggle_auto.reform(|_| ())}
-                        disabled={!is_machine_running || !props.is_program_ready}
-                    >
-                        {if props.auto_play { "Pause" } else { "Auto" }}
-                    </button>
-                    <div class="speed-control">
-                        <label for="speed-select">{"Speed: "}</label>
-                        <select id="speed-select" class="custom-select select select-bordered" onchange={Callback::from(move |e: Event| {
-                            let speed_str = e.target_unchecked_into::<web_sys::HtmlSelectElement>().value();
-                            on_speed_change.emit(speed_str.parse().unwrap_or(500));
-                        })}>
-                            <option value="2000" selected={props.speed == 2000}>{"0.25x"}</option>
-                            <option value="1000" selected={props.speed == 1000}>{"0.5x"}</option>
-                            <option value="500" selected={props.speed == 500}>{"1x"}</option>
-                            <option value="250" selected={props.speed == 250}>{"2x"}</option>
-                            <option value="125" selected={props.speed == 125}>{"4x"}</option>
-                        </select>
-                    </div>
+                    <div class="tape-controls flex flex-wrap items-center gap-2">
+                        <button
+                            class="btn btn-primary"
+                            onclick={props.on_step.reform(|_| ())}
+                            disabled={!is_machine_running || !props.is_program_ready}
+                        >
+                            {"Step"}
+                        </button>
+                        <button
+                            class="btn btn-secondary"
+                            onclick={props.on_reset.reform(|_| ())}
+                            disabled={!props.is_program_ready}
+                        >
+                            {"Reset"}
+                        </button>
+                        <button
+                            class={format!("btn {}", if props.auto_play { "btn-warning" } else { "btn-success" })}
+                            onclick={props.on_toggle_auto.reform(|_| ())}
+                            disabled={!is_machine_running || !props.is_program_ready}
+                        >
+                            {if props.auto_play { "Pause" } else { "Auto" }}
+                        </button>
 
-                    <div class="speed-control">
-                        <label for="speed-select">{"Speed: "}</label>
-                        <div class="input-stack">
-                            <input type="range" min="1" max="100"/>
-                            <div id="speed-num">{"1.0x"}</div>
+                        <div class="flex items-center gap-2 px-3 py-2 bg-base-200 rounded-btn border border-base-300">
+                            <label class="text-sm font-medium text-base-content">{"Speed:"}</label>
+                            <input
+                                type="range"
+                                min="-2"
+                                max="8"
+                                step="1"
+                                value={current_speed.to_string()}
+                                class="range range-sm range-primary w-24 sm:w-32"
+                                oninput={on_speed_input}
+                            />
+                            <span class="text-sm font-mono w-14 text-right text-base-content tabular-nums inline-block">
+                                { format!("{}x", 2f64.powi(current_speed)) }
+                            </span>
                         </div>
+
+                        <button 
+                            class={format!("btn {}", if props.show_analysis { "btn-active btn-secondary" } else { "btn-outline" })}
+                            onclick={props.on_toggle_analysis.reform(|_| ())}
+                            disabled={!props.is_program_ready}
+                        >
+                            { "Analyser" }
+                        </button>
                     </div>
-                </div>
             </div>
             <div class="tapes-container">
                 {props.tapes.iter().enumerate().map(|(tape_index, tape)| {

@@ -1,4 +1,4 @@
-use crate::components::{GraphView, MachineState, ProgramEditor, ShareButton, TapeView};
+use crate::components::{GraphView, MachineState, ProgramEditor, ShareButton, TapeView, ComplexityAnalyser};
 use crate::url_sharing::UrlSharing;
 use action::Action;
 use gloo_events::EventListener;
@@ -21,6 +21,7 @@ pub enum Msg {
     UpdateEditorText(String),
     SetSpeed(u64),
     HideProgramEditorHelp,
+    ToggleAnalysis,
 }
 
 pub struct App {
@@ -35,6 +36,7 @@ pub struct App {
     previous_state: String,
     speed: u64,
     machine_state: MachineState,
+    show_analysis: bool,
 
     _keyboard_listener: EventListener,
     keymap: Config<Action>,
@@ -67,6 +69,7 @@ impl App {
             previous_state: initial_state,
             speed: 500,
             machine_state: MachineState::Running,
+            show_analysis: false,
 
             _keyboard_listener: keyboard_listener,
             keymap: Action::keymap_config(),
@@ -336,6 +339,10 @@ impl Component for App {
                 self.show_program_editor_help = false;
                 true
             }
+            Msg::ToggleAnalysis => {
+                self.show_analysis = !self.show_analysis;
+                true
+            }
         }
     }
 
@@ -352,11 +359,13 @@ impl Component for App {
                             <div class="card-body">
                                 <div class="editor-header">
                                     <h3 class="card-title">{"Program Editor"}</h3>
-                                    <ShareButton
-                                        program_name={self.current_program_def.name.clone()}
-                                        program_code={self.editor_text.clone()}
-                                        is_enabled={self.is_program_ready}
-                                    />
+                                    <div class="flex gap-2">
+                                        <ShareButton
+                                            program_name={self.current_program_def.name.clone()}
+                                            program_code={self.editor_text.clone()}
+                                            is_enabled={self.is_program_ready}
+                                        />
+                                    </div>
                                 </div>
                                 <ProgramEditor
                                     program_text={self.editor_text.clone()}
@@ -372,7 +381,7 @@ impl Component for App {
                                 />
                             </div>
                         </div>
-                                                  <div class="help-section card card-compact bg-base-100">
+                        <div class="help-section card card-compact bg-base-100">
                             <div class="card-body">
                                 <h3 class="card-title">{"Keyboard Shortcuts"}</h3>
                                 <ul>{ help_text_items }</ul>
@@ -401,7 +410,12 @@ impl Component for App {
                                         on_speed_change={link.callback(|speed: u64| Msg::SetSpeed(speed))}
                                         tape_left_offsets={self.tape_left_offsets.clone()}
                                         message={self.message.clone()}
+                                        on_toggle_analysis={link.callback(|_| Msg::ToggleAnalysis)}
+                                        show_analysis={self.show_analysis}
                                     />
+                                    if self.show_analysis {
+                                        <ComplexityAnalyser program={self.current_program_def.clone()} />
+                                    }
                                 </div>
                             </div>
 

@@ -1,4 +1,4 @@
-use crate::{Program, Step, Transition, TuringMachineError, machine::*};
+use crate::{Program, Step, Transition, TuringMachineError, machine::*, types::MAX_EXECUTION_STEPS};
 
 use std::{collections::{HashMap, HashSet}, f64::consts::E, ops::Range, usize, vec};
 use rand::{Rng, rngs::{ThreadRng, StdRng}, seq::{SliceRandom}, SeedableRng};
@@ -86,14 +86,6 @@ impl Clone for Bound {
 }
 
 impl Bound {
-    fn has_variable(&self, target_name: &str) -> bool {
-        match self {
-            Bound::Variable(var_name) => var_name == target_name,
-            Bound::Calculation(left, _, right) => left.has_variable(target_name) | right.has_variable(target_name),
-            _ => false,
-        }
-    }
-
     fn calculate_bound(&self, context: &HashMap<String, i32>) -> Option<i32> {
         let result = self.calculate_bound_components(context).min(REPEAT_LIMIT);
         return Some(result);
@@ -116,6 +108,8 @@ impl Bound {
         };
     }
 
+    // used for debugging with recur_to_string. provides a string representation of a bound
+    #[warn(unused)]
     fn get_string(&self) -> String {
         return match self {
             Bound::Literal(lit) => lit.to_string(),
@@ -180,11 +174,13 @@ impl ExpressionParser {
     fn parse_literal(&self, c_vec: Vec<char>, index: usize) -> Result<(Token, usize), String> {
         let min_length: usize = 1;
         let initial_length: usize = c_vec.len();
+        // unreachable so long as min_length = 1
         if initial_length < min_length {
             return Err(format!("Error: Received invalid literal - literals must be at least {} character(s) long", min_length))
         }
 
         for next_char in &c_vec {
+            // redundancy - already checked for elsewhere before producing a literal
             match next_char {
                 '[' | '(' | '{' => {
                     return Err(format!("Error: Received invalid character in literal ('{}') at index {} - literals do not support nesting", next_char, index));
@@ -471,7 +467,8 @@ impl ExpressionParser {
         return Self::recur_to_string(&token, 0);
     }
 
-    // converts a given token into its string representation
+    // converts a given token into its string representation - used for debug
+    #[warn(unused)]
     fn recur_to_string(token: &Token, indentation: usize) -> String {
         let indent_spacing: String = " ".repeat(indentation * 2);
         return match token {
@@ -1030,21 +1027,23 @@ fn main() {
 }
 
 pub struct AnalysisInfo {
-    estimated_complexity: Complexity,
-    estimated_state_complexities: HashMap<String, Complexity>,
+    pub estimated_complexity: Complexity,
+    pub graph_data: Vec<(usize, usize)>,
+    pub estimated_state_complexities: HashMap<String, Complexity>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, PartialOrd)]
 // could add more. each just needs a corresponding complexity function definition, but the more there are the higher the chance of an incorrect classification
 // due to the impact of lesser terms
-enum Complexity {
-    Constant,
-    N,
-    Nlogn,
-    N2,
-    N2logn,
-    N3,
-    Exp,
+pub enum Complexity {
+    Unknown = isize::MIN,
+    Constant = 0,
+    N = 10,
+    Nlogn = 20,
+    N2 = 30,
+    N2logn = 40,
+    N3 = 50,
+    Exp = 60,
 }
 
 impl Complexity {
@@ -1063,23 +1062,12 @@ impl Complexity {
             }),
             Complexity::N3 => Box::new(| n: usize | (n.pow(3)) as f64),
             Complexity::Exp => Box::new(| n: usize | E.powi(n as i32)),
+            _ => Box::new(| _: usize| 0f64 ),
         }
-    }
-
-    fn generate_to_range(&self, range: Range<usize>) -> Vec<(usize, f64)> {
-        let complexity_function = self.get_complexity_function();
-        let mut result: Vec<(usize, f64)> = Vec::new();
-
-        for i in range {
-            let point = (i, complexity_function(i));
-            result.push(point);
-        }
-
-        result
     }
 }
 
-pub fn analyse_expression(expression_string: &str, program: Program) -> Result<AnalysisInfo, String> {
+pub fn analyse_expression(expression_string: &str, program: &Program) -> Result<AnalysisInfo, String> {
     let max_generation_length = 100;
     let max_generations = 30;
 
@@ -1112,7 +1100,7 @@ pub fn analyse_expression(expression_string: &str, program: Program) -> Result<A
         .map(| (input_string, machine, _) | (input_string.len(), machine.step_count()))
         .collect();
 
-    let estimated_complexity = estimate_complexity(&mut total_runtimes);
+    let overall_complexity = estimate_complexity(&mut total_runtimes);
 
     // encode state runtimes in a hashmap mapping state name -> (input length, state runtime)
     let mut state_runtimes: HashMap<String, Vec<(usize, usize)>> = HashMap::new();
@@ -1133,11 +1121,13 @@ pub fn analyse_expression(expression_string: &str, program: Program) -> Result<A
     let mut state_complexities: HashMap<String, Complexity> = HashMap::new();
     for (state_name, mut runtimes) in state_runtimes {
         let state_complexity = estimate_complexity(&mut runtimes);
-        state_complexities.insert(state_name, state_complexity);
+        let bounded_complexity = if state_complexity > overall_complexity { overall_complexity.clone() } else { state_complexity };
+        state_complexities.insert(state_name, bounded_complexity);
     }
 
     Ok(AnalysisInfo {
-        estimated_complexity: estimated_complexity, 
+        estimated_complexity: overall_complexity, 
+        graph_data: total_runtimes,
         estimated_state_complexities: state_complexities 
     })
 }
@@ -1152,24 +1142,34 @@ fn estimate_complexity(machine_points: &mut Vec<(usize, usize)>) -> Complexity {
     for complexity in complexities {
         let complexity_function = complexity.get_complexity_function();
 
-        // calculate B value for given complexity
+        // calculates constant multiplier which minimises error (b)
         let mut xy: f64 = 0f64;
         let mut xx: f64 = 0f64;
         for &(index, value) in machine_points.iter() {
             let x = complexity_function(index.clone());
             let y = value as f64;
+            // skip iterations where the state is never visited, or has hit the maximum number of steps
+            if value == 0 || value == MAX_EXECUTION_STEPS {
+                continue;
+            }
 
             xy += x * y;
             xx += x * x;
         }
 
-        // get least squares b estimation through B = (X * Y) / (X * X)
+        // if there are no remaining valid states, exit before continuing further
+        if xx == 0f64 {
+            return Complexity::Unknown;
+        }
+
+        // get least squares constant estimation through B = (X * Y) / (X * X)
         let b = xy / xx;
 
-        // now use residual sum of squares to get squared error against initial machine points
+        // now calculates residual error by using the constant multiplier. the complexity with the lowest adjusted error is the most likely complexity
         let mut residual_sum: f64 = 0f64;
         for &(index, value) in machine_points.iter() {
-            residual_sum += (value as f64 - b * complexity_function(index)).powi(2);
+            // standard rss * weighting - higher indices are more trustworthy as higher time complexities are more prominent as n tends to infinity
+            residual_sum += (value as f64 - b * complexity_function(index)).powi(2) * ((index as f64).sqrt());
         }
 
         if residual_sum < best_error {
