@@ -9,9 +9,9 @@ export function draw_runtime_chart(canvas_id, x_data, y_data) {
   const style = getComputedStyle(document.body);
 
   // pulls colours from style.css to be used here
-  const primaryColour = style.getPropertyValue('--tertiary-dark-color');
+  const primaryColour = style.getPropertyValue('--text-color');
   const textColour = style.getPropertyValue('--text-color');
-  const gridColour = style.getPropertyValue('--text-color');
+  const gridColour = style.getPropertyValue('--background-color');
   const fontMono = style.getPropertyValue('--font-family-mono');
 
   runtimeChart = new Chart(ctx, {
@@ -26,6 +26,7 @@ export function draw_runtime_chart(canvas_id, x_data, y_data) {
         tension: 0.4, // determines line curvature
         pointRadius: 3,
         pointHoverRadius: 6,
+        spanGaps: true,
       }]
     },
     options: {

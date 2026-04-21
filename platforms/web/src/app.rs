@@ -21,7 +21,6 @@ pub enum Msg {
     UpdateEditorText(String),
     SetSpeed(u64),
     HideProgramEditorHelp,
-    ToggleAnalysis,
 }
 
 pub struct App {
@@ -36,7 +35,6 @@ pub struct App {
     previous_state: String,
     speed: u64,
     machine_state: MachineState,
-    show_analysis: bool,
 
     _keyboard_listener: EventListener,
     keymap: Config<Action>,
@@ -69,7 +67,6 @@ impl App {
             previous_state: initial_state,
             speed: 500,
             machine_state: MachineState::Running,
-            show_analysis: false,
 
             _keyboard_listener: keyboard_listener,
             keymap: Action::keymap_config(),
@@ -339,10 +336,6 @@ impl Component for App {
                 self.show_program_editor_help = false;
                 true
             }
-            Msg::ToggleAnalysis => {
-                self.show_analysis = !self.show_analysis;
-                true
-            }
         }
     }
 
@@ -410,8 +403,6 @@ impl Component for App {
                                         on_speed_change={link.callback(|speed: u64| Msg::SetSpeed(speed))}
                                         tape_left_offsets={self.tape_left_offsets.clone()}
                                         message={self.message.clone()}
-                                        on_toggle_analysis={link.callback(|_| Msg::ToggleAnalysis)}
-                                        show_analysis={self.show_analysis}
                                     />
                                 </div>
                             </div>
@@ -429,9 +420,7 @@ impl Component for App {
                                 </div>
                             </div>
 
-                            if self.show_analysis {
-                                <ComplexityAnalyser program={self.current_program_def.clone()} />
-                            }
+                            <ComplexityAnalyser program={self.current_program_def.clone()} />
                         </div>
 
                     </div>

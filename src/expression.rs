@@ -1,6 +1,6 @@
 use crate::{Program, Step, Transition, TuringMachineError, machine::*, types::MAX_EXECUTION_STEPS};
 
-use std::{collections::{HashMap, HashSet}, f64::consts::E, ops::Range, usize, vec};
+use std::{collections::{HashMap, HashSet}, f64::consts::E, fmt, ops::Range, usize, vec};
 use rand::{Rng, rngs::{ThreadRng, StdRng}, seq::{SliceRandom}, SeedableRng};
 
 const REPEAT_LIMIT: i32 = 128;
@@ -1078,37 +1078,47 @@ impl Complexity {
     }
 }
 
+impl fmt::Display for Complexity {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        return match self {
+            Complexity::Constant => write!(f, "O(1)"),
+            Complexity::N => write!(f, "O(n)"),
+            Complexity::N2 => write!(f, "O(n²)"),
+            Complexity::Nlogn => write!(f, "O(n log n)"),
+            Complexity::N2logn => write!(f, "O(n² log n)"),
+            Complexity::N3 => write!(f, "O(n³)"),
+            Complexity::Exp => write!(f, "O(2ⁿ)"),
+            _ => write!(f, "Unknown"),
+        }
+    }
+}
+
 fn process_expression_string(expression_string: &str) -> Result<Vec<String>, String> {
     let mut expression_vec: Vec<String> = Vec::new();
-    let mut expression_iter = expression_string.chars().into_iter();
     let mut expression_buffer: Vec<char> = Vec::new();
     let mut escaped_char = false;
 
-    let mut index: usize = 0;
-
-    while let Some(next_char) = expression_iter.next() {
-        match next_char {
-            DELIMITER_CHAR => {
-                if (escaped_char) { expression_buffer.push(next_char) }
-                else { 
-                    if let Some(error_message) = push_buffer(&mut expression_buffer, &mut expression_vec, index) { return Err(error_message) }
-                    escaped_char = false;
-                }
+    for (index, next_char) in expression_string.chars().enumerate() {
+        if escaped_char {
+            expression_buffer.push(next_char);
+            escaped_char = false;
+        } else if next_char == ESCAPE_CHAR {
+            escaped_char = true;
+            expression_buffer.push(next_char);
+        } else if next_char == DELIMITER_CHAR {
+            if let Some(error_message) = push_buffer(&mut expression_buffer, &mut expression_vec, index) { 
+                return Err(error_message);
             }
-            ESCAPE_CHAR => { 
-                escaped_char = true;
-                expression_buffer.push(next_char);
-             }
-            _ => {
-                escaped_char = false; 
-                expression_buffer.push(next_char); 
-            }
+        } else {
+            expression_buffer.push(next_char);
         }
-        index += 1;
     }
-    if let Some(error_message) = push_buffer(&mut expression_buffer, &mut expression_vec, index) { return Err(error_message) }
 
-    return Ok(expression_vec);
+    if let Some(error_message) = push_buffer(&mut expression_buffer, &mut expression_vec, expression_string.len()) { 
+        return Err(error_message);
+    }
+
+    Ok(expression_vec)
 }
 
 // pushes the expression buffer onto the expression vec, and clears the buffer
@@ -1170,7 +1180,7 @@ fn analyse_string(expression_string: &String, program: &Program) -> Result<Analy
     let max_generation_length: usize = 100;
     // overall generation count restriction - stops processing string after point count exceeds this value
     let max_generations: usize = 50;
-    // number of attempts made to generate each point - currently unused
+    // number of attempts made to generate each point - currently unused and unimplemented
     let generation_attempts: usize = 5;
 
     let generated_token = ExpressionParser::produce_token(expression_string)?;

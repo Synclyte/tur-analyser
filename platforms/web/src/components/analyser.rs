@@ -30,8 +30,26 @@ fn runtime_chart(props: &ChartProps) -> Html {
 
     use_effect_with(data.clone(), move |points| {
         if !points.is_empty() {
-            let x_data: Vec<f64> = points.iter().map(|(x, _)| *x as f64).collect();
-            let y_data: Vec<f64> = points.iter().map(|(_, y)| *y as f64).collect();
+            let min_x = points.first().map(|(x, _)| *x).unwrap_or(0);
+            let max_x = points.last().map(|(x, _)| *x).unwrap_or(0);
+
+            let mut x_data: Vec<f64> = Vec::new();
+            let mut y_data: Vec<f64> = Vec::new();
+
+            let mut current_x = 0;
+            // adds padding for non-continuous points
+            for x in min_x..=max_x {
+                let current_data_point = points[current_x];
+                x_data.push(x as f64);
+                // if a value for the current x exists in the graph data, push it
+                // otherwise, push NAN to pad
+                if current_x < points.len() && current_data_point.0 == x {
+                    y_data.push(current_data_point.1 as f64);
+                    current_x += 1;
+                } else {
+                    y_data.push(f64::NAN);
+                }
+            }
             
             draw_runtime_chart("complexity-chart", x_data, y_data);
         }
@@ -145,13 +163,15 @@ pub fn complexity_analyser(props: &AnalyserProps) -> Html {
                     placeholder="Enter Regex input generation expression..."
                     style="overflow: hidden;"
                 />
-                <button 
-                    class="btn btn-primary px-8 w-full sm:w-auto justify-center"
-                    onclick={on_analyse_click} 
-                    disabled={*is_analysing || regex_input.is_empty()}
-                >
-                    { if *is_analysing { "Simulating Machine" } else { "Run Analysis" } }
-                </button>
+                <div style="display: flex; justify-content: flex-end; width: 100%; margin-top: 0.75rem;">
+                    <button 
+                        class="btn btn-primary px-8"
+                        onclick={on_analyse_click} 
+                        disabled={*is_analysing || regex_input.is_empty()}
+                    >
+                        { if *is_analysing { "Simulating Machine" } else { "Run Analysis" } }
+                    </button>
+                </div>
 
                 {
                     match &*analysis_result {
@@ -167,44 +187,61 @@ pub fn complexity_analyser(props: &AnalyserProps) -> Html {
                         Some(Ok(info)) => {
                             let mut sorted_states: Vec<(&String, &Complexity)> = info.estimated_state_complexities
                                 .iter()
-                                .filter(|(state, _)| *state != "start" && *state != "stop") // "start" and "stop" are specifically blacklisted here, as they are always only visited once
+                                .filter(|(state, _)| *state != "start" && *state != "stop")
                                 .collect();
 
-                            // sorts alphabetically to maintain order consistency across analysis runs
                             sorted_states.sort_by(|a, b| a.0.cmp(b.0));
 
                             html! {
                                 <div 
-                                    class="grid grid-cols-1 lg:grid-cols-3 gap-4 mt-4"
-                                    style="padding-top: 30px;"
-                                    >
+                                    class="grid grid-cols-1 lg:grid-cols-3 gap-8 mt-6 pt-6 border-t border-base-200"
+                                >
                                     <div class="col-span-1 lg:col-span-2">
                                         <RuntimeChart data={info.graph_data.clone()} />
                                     </div>
                                     
-                                    <div class="col-span-1 flex flex-col gap-4 h-full">
-                                        <div class="bg-base-200 rounded-box p-5 flex flex-col justify-center items-center border border-base-300 shadow-sm">
-                                            <span class="text-xs font-bold uppercase tracking-wider text-base-content/60">{"Global Complexity"}</span>
-                                            <span class="text-4xl font-black text-primary mt-2">{ format!("O({:?})", info.estimated_complexity) }</span>
+                                    <div class="col-span-1 flex flex-col gap-6 h-full">
+                                        
+                                        <div class="bg-base-200 rounded-box p-6 flex flex-col justify-center items-center border border-base-300 shadow-sm" style="padding-bottom:20px;">
+                                            <h3 class="card-title text-lg text-white mb-3">{"Overall Complexity"}</h3>
+                                            <span class="text-4xl text-primary">{ format!("{}", info.estimated_complexity) }</span>
                                         </div>
                                         
                                         <div class="flex-grow overflow-hidden rounded-box border border-base-300 bg-base-100 shadow-sm flex flex-col">
-                                            <div class="bg-base-200 px-4 py-3 border-b border-base-300 flex justify-between items-center">
-                                                <span class="text-xs font-bold uppercase tracking-wider text-base-content/60">{"State Breakdown"}</span>
-                                                <span class="badge badge-sm badge-outline">{ sorted_states.len() }</span>
+                                            
+                                            <div class="bg-base-200 p-4 border-b border-base-300">
+                                                <h3 class="card-title text-lg text-white mb-3">{"State Breakdown"}</h3>
                                             </div>
-                                            <div class="overflow-y-auto" style="max-height: 250px;">
-                                                <table class="table table-zebra table-sm w-full">
-                                                    <tbody>
+                                            
+                                            <div class="overflow-y-auto" style="max-height: 350px;">
+                                                <div class="border border-base-300 rounded-b-box justify-center" style="display: flex; flex-direction: column; width: 100%;">
+                                                    
+                                                    <div class="bg-base-300 text-white border-b border-base-300" style="display: flex; width: 100%;">
+                                                        <div class="border-r border-base-300 font-bold text-base" style="min-width: 100px; padding: 0.1rem; text-align: left;">
+                                                            {"State Name"}
+                                                        </div>
+                                                        <div class="font-bold text-base" style="min-width: 100px; padding: 0.1rem; text-align: left;">
+                                                            {"Time Complexity"}
+                                                        </div>
+                                                    </div>
+                                                    
+                                                    // THE ROWS
+                                                    <div style="display: flex; flex-direction: column; width: 100%;">
                                                         { for sorted_states.iter().map(|(state, comp)| html! {
-                                                            <tr>
-                                                                <td class="font-mono text-sm pl-4">{ state }</td>
-                                                                <td class="font-bold text-right text-secondary pr-4">{ format!("{:?}", comp) }</td>
-                                                            </tr>
+                                                            <div class="border-b border-base-300 hover:bg-base-200 transition-colors" style="display: flex; width: 100%;">
+                                                                <div class="border-r border-base-300 font-mono text-base" style="min-width: 100px; padding: 0.1rem; display: flex; align-items: center; justify-content: flex-start;">
+                                                                    { state }
+                                                                </div>
+                                                                <div class="text-primary font-bold text-base" style="min-width: 100px; padding: 0.1rem; display: flex; align-items: center; justify-content: flex-start;">
+                                                                    { format!("{}", comp) }
+                                                                </div>
+                                                            </div>
                                                         }) }
-                                                    </tbody>
-                                                </table>
+                                                    </div>
+                                                    
+                                                </div>
                                             </div>
+                                            
                                         </div>
                                     </div>
                                 </div>
@@ -227,9 +264,32 @@ pub fn complexity_analyser(props: &AnalyserProps) -> Html {
                             {"×"}
                         </button>
                         
-                        <h3 class="font-bold text-lg mb-4">{"Complexity Analysis"}</h3>
-                        <div class="space-y-4 text-base-content/80">
-                            <p>{"help information here"}</p>
+                        <h3 class="font-bold text-lg">{"Complexity Analysis Help"}</h3>
+                        <div class="help-content">
+                            <h4 class="help-heading">{"The Premise:"}</h4>
+                            <p class="help-paragraph">{"
+                            Time Complexity analysis of a Turing Machine is done by providing it with inputs and measuring the number of steps taken for that input to terminate. 
+                            This can require a large number of inputs to do correctly, and many simple Turing Machines are highly formulaic, making this a waste of time.
+                            Therefore, a variant of regular expressions can be used here to automatically generate expressions.
+                            "}</p>
+
+                            <h4 class="help-heading">{"Regular Expressions:"}</h4>
+                            <p class="help-paragraph">{"
+                            The variant of regular expressions used here has a simplified syntax, and supports different features compared to typical RegEx. For example:
+                            "}</p>
+                            <ul class="help-list">
+                                <li class="help-list-item">{"Generate either '0', '1', or '22': "}<code>{"(0|1|22)"}</code></li>
+                                <li class="help-list-item">{"Repeat '0' 10-20 times: "}<code>{"0{10,20}"}</code></li>
+                                <li class="help-list-item">{"A simple generator for binary addition inputs: "} <code>{"$(0|1)*"}</code></li>
+                                <li class="help-list-item">{"A simple even number generator: "}<code>{"(1|0){2}+0"}</code></li>
+                            </ul>
+
+                            <h4 class="help-heading">{"Advanced Features:"}</h4>
+                            <p class="help-paragraph">{"Format: "} <code>{"current_symbol -> new_symbol, direction, next_state"}</code></p>
+                            <ul class="help-list">
+                                <li class="help-list-item">{"Directions: "} <code>{"L"}</code> {" (left), "} <code>{"R"}</code> {" (right), "} <code>{"S"}</code> {" (stay)"}</li>
+                                <li class="help-list-item">{"Use "} <code>{"_"}</code> {" as a special symbol to match/write the program's blank symbol (e.g., if blank is ' ', then '_' matches ' ')"}</li>
+                            </ul>
                         </div>
                     </div>
                     

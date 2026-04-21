@@ -19,8 +19,6 @@ pub struct TapeViewProps {
     pub on_speed_change: Callback<u64>,
     pub tape_left_offsets: Vec<usize>,
     pub message: String,
-    pub on_toggle_analysis: Callback<()>,
-    pub show_analysis: bool,
 }
 
 #[function_component(TapeView)]
@@ -74,14 +72,6 @@ pub fn tape_view(props: &TapeViewProps) -> Html {
                                 <option value="0" selected={props.speed == 0}>{"Max"}</option>
                             </select>
                         </div>
-
-                        <button 
-                            class={format!("btn {}", if props.show_analysis { "btn-warning" } else { "btn-success" })}
-                            onclick={props.on_toggle_analysis.reform(|_| ())}
-                            disabled={!props.is_program_ready}
-                        >
-                            {if props.show_analysis { "Hide Analyser" } else { "Show Analyser" } }
-                        </button>
                     </div>
             </div>
             <div class="tapes-container">
