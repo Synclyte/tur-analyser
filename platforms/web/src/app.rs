@@ -413,9 +413,6 @@ impl Component for App {
                                         on_toggle_analysis={link.callback(|_| Msg::ToggleAnalysis)}
                                         show_analysis={self.show_analysis}
                                     />
-                                    if self.show_analysis {
-                                        <ComplexityAnalyser program={self.current_program_def.clone()} />
-                                    }
                                 </div>
                             </div>
 
@@ -431,6 +428,10 @@ impl Component for App {
                                     />
                                 </div>
                             </div>
+
+                            if self.show_analysis {
+                                <ComplexityAnalyser program={self.current_program_def.clone()} />
+                            }
                         </div>
 
                     </div>

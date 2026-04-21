@@ -21,7 +21,7 @@ pub enum ProgramEditorMsg {
     UpdateText(String),
     ValidateProgram,
     OpenHelpModal,
-    CloseHelpModal,
+    CloseHelpModal
 }
 
 pub struct ProgramEditor {
@@ -258,7 +258,7 @@ rules:
                         >
                             <div class="modal-box w-11/12 max-w-5xl relative" onclick={link.callback(|e: MouseEvent| { e.stop_propagation(); ProgramEditorMsg::ValidateProgram })}>
                                 <button
-                                    class="btn btn-sm btn-circle btn-ghost"
+                                    class="btn btn-circle btn-sm btn-neutral border-none transition-colors shrink-0"
                                     onclick={link.callback(|_| ProgramEditorMsg::CloseHelpModal)}
                                     style="position: absolute; top: 8px; right: 8px; display: flex; align-items: center; justify-content: center; font-size: 18px; line-height: 1; z-index: 10;"
                                 >

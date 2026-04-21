@@ -4,6 +4,8 @@ use std::{collections::{HashMap, HashSet}, f64::consts::E, ops::Range, usize, ve
 use rand::{Rng, rngs::{ThreadRng, StdRng}, seq::{SliceRandom}, SeedableRng};
 
 const REPEAT_LIMIT: i32 = 128;
+const ESCAPE_CHAR: char = '\\';
+const DELIMITER_CHAR: char = ';';
 
 // token struct for representing regular expressions
 // covers all basic regex operations 
@@ -197,7 +199,7 @@ impl ExpressionParser {
     /// * generic parsing function. processes a given `Vec<char>` considering the next character
     /// * returns a `Token::Choice` or a `Token::Sequence`, containing all `Token`s at this 'level' of the tree
     fn parse_chars(&mut self, c_vec: &Vec<char>, exit_char: char, mut index: usize) -> Result<(Token, usize), String> {
-        let special_chars: Vec<char> = vec!['(', '|', '{', '*', '+', '?', ')', '}', exit_char];
+        let special_chars: Vec<char> = vec!['(', '|', '{', '*', '+', '?', ')', '}', ESCAPE_CHAR, exit_char];
         let total_len: usize = c_vec.len();
         let mut token_vec: Vec<Token> = Vec::new();
         let mut next_char: char = c_vec[index];
@@ -206,6 +208,15 @@ impl ExpressionParser {
 
         while next_char != exit_char {
             match next_char {
+                // escape character - forces next character to be evaluated as a literal
+                ESCAPE_CHAR => {
+                    if let Some(escaped_char) = c_vec.get(index + 1) {
+                        literal_buffer.push(*escaped_char);
+                    } else {
+                        return Err(format!("Error: Received invalid escape at index {} - escape must have a target", index));
+                    }
+                    index += 1;
+                }
                 // handles choices - produces a list containing the indices of the starting position of all choices for later splitting
                 '|' => {
                     let next_index: usize = token_vec.len();
@@ -1032,7 +1043,7 @@ pub struct AnalysisInfo {
     pub estimated_state_complexities: HashMap<String, Complexity>,
 }
 
-#[derive(Debug, Clone, PartialEq, PartialOrd)]
+#[derive(Debug, Clone, PartialEq, PartialOrd, Eq, Ord, Copy)]
 // could add more. each just needs a corresponding complexity function definition, but the more there are the higher the chance of an incorrect classification
 // due to the impact of lesser terms
 pub enum Complexity {
@@ -1067,9 +1078,100 @@ impl Complexity {
     }
 }
 
+fn process_expression_string(expression_string: &str) -> Result<Vec<String>, String> {
+    let mut expression_vec: Vec<String> = Vec::new();
+    let mut expression_iter = expression_string.chars().into_iter();
+    let mut expression_buffer: Vec<char> = Vec::new();
+    let mut escaped_char = false;
+
+    let mut index: usize = 0;
+
+    while let Some(next_char) = expression_iter.next() {
+        match next_char {
+            DELIMITER_CHAR => {
+                if (escaped_char) { expression_buffer.push(next_char) }
+                else { 
+                    if let Some(error_message) = push_buffer(&mut expression_buffer, &mut expression_vec, index) { return Err(error_message) }
+                    escaped_char = false;
+                }
+            }
+            ESCAPE_CHAR => { 
+                escaped_char = true;
+                expression_buffer.push(next_char);
+             }
+            _ => {
+                escaped_char = false; 
+                expression_buffer.push(next_char); 
+            }
+        }
+        index += 1;
+    }
+    if let Some(error_message) = push_buffer(&mut expression_buffer, &mut expression_vec, index) { return Err(error_message) }
+
+    return Ok(expression_vec);
+}
+
+// pushes the expression buffer onto the expression vec, and clears the buffer
+// returns a String if there is an error, otherwise returns None
+fn push_buffer(expression_buffer: &mut Vec<char>, expression_vec: &mut Vec<String>, index: usize) -> Option<String> {
+    if expression_buffer.len() == 0 { return Some(format!("Error: Empty expression in expression string at index {}", index)) }
+    let buffer_string: String = expression_buffer.iter().collect();
+    expression_vec.push(buffer_string);
+
+    expression_buffer.clear();
+    return None;
+}
+
 pub fn analyse_expression(expression_string: &str, program: &Program) -> Result<AnalysisInfo, String> {
-    let max_generation_length = 100;
-    let max_generations = 30;
+    let expression_strings = process_expression_string(expression_string)?;
+    let mut final_analysis_info = AnalysisInfo {
+        estimated_complexity: Complexity::Unknown,
+        graph_data: Vec::new(),
+        estimated_state_complexities: HashMap::new()
+    };
+    let analysis_data: Vec<AnalysisInfo> = expression_strings.into_iter()
+        .map(|exp| { Ok(analyse_string(&exp, program)?) })
+        .collect::<Result<Vec<AnalysisInfo>, String>>()?;
+
+    // add all worst step counts to a central map
+    let mut final_graph_map: HashMap<usize, usize> = HashMap::new();
+    for analysed_expression in &analysis_data {
+        for &(input_length, steps) in &analysed_expression.graph_data {
+            final_graph_map
+                .entry(input_length)
+                .and_modify(|current_length| *current_length = steps.max(*current_length))
+                .or_insert(steps);
+        }
+    }
+
+    // convert the map back into a vector and sort it
+    let mut final_graph: Vec<(usize, usize)> = final_graph_map.into_iter().collect();
+    final_graph.sort_by_key(|&(input_length, _)| input_length);
+
+    final_analysis_info.graph_data = final_graph;
+    // re-estimate global complexity
+    final_analysis_info.estimated_complexity = estimate_complexity(&mut final_analysis_info.graph_data);
+    
+    // compile new state complexities for each state based on highest estimated complexity
+    for analysed_expression in analysis_data {
+        for (state, estimated_complexity) in analysed_expression.estimated_state_complexities {
+            final_analysis_info.estimated_state_complexities
+                .entry(state)
+                .and_modify(|current_complexity| *current_complexity = estimated_complexity.max(*current_complexity))
+                .or_insert(estimated_complexity);
+        }
+    }
+
+    return Ok(final_analysis_info);
+}
+
+fn analyse_string(expression_string: &String, program: &Program) -> Result<AnalysisInfo, String> {
+    // overall length restriction - refuses to process strings with length greater than this value
+    let max_generation_length: usize = 100;
+    // overall generation count restriction - stops processing string after point count exceeds this value
+    let max_generations: usize = 50;
+    // number of attempts made to generate each point - currently unused
+    let generation_attempts: usize = 5;
 
     let generated_token = ExpressionParser::produce_token(expression_string)?;
     let generated_strings: Vec<String> = generated_token.generate_strings_in_range(0..max_generation_length, max_generations);
@@ -1090,7 +1192,7 @@ pub fn analyse_expression(expression_string: &str, program: &Program) -> Result<
         .collect();
 
     if machine_runtimes.is_empty() {
-        return Err("Failed to simulate Turing Machine - no valid outputs found".into());
+        return Err("Error: Failed to simulate Turing Machine - no valid outputs found".into());
     }
 
     // through comparing the average squared error of various time complexity functions to the actual runtime functions
