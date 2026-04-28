@@ -1,6 +1,6 @@
 use crate::{Program, Step, Transition, TuringMachineError, machine::*, types::MAX_EXECUTION_STEPS};
 
-use std::{collections::{HashMap, HashSet}, f64::consts::E, fmt, ops::Range, usize, vec};
+use std::{collections::{HashMap, HashSet}, f64::consts::E, fmt, hash::Hash, ops::Range, usize, vec};
 use rand::{Rng, rngs::{ThreadRng, StdRng}, seq::{SliceRandom}, SeedableRng};
 
 const REPEAT_LIMIT: i32 = 128;
@@ -1041,6 +1041,7 @@ pub struct AnalysisInfo {
     pub estimated_complexity: Complexity,
     pub graph_data: Vec<(usize, usize)>,
     pub estimated_state_complexities: HashMap<String, Complexity>,
+    pub state_graph_data: HashMap<String, Vec<(usize, usize)>>
 }
 
 #[derive(Debug, Clone, PartialEq, PartialOrd, Eq, Ord, Copy)]
@@ -1088,7 +1089,7 @@ impl fmt::Display for Complexity {
             Complexity::N2logn => write!(f, "O(n² log n)"),
             Complexity::N3 => write!(f, "O(n³)"),
             Complexity::Exp => write!(f, "O(2ⁿ)"),
-            _ => write!(f, "Unknown"),
+            _ => write!(f, "None"),
         }
     }
 }
@@ -1132,15 +1133,16 @@ fn push_buffer(expression_buffer: &mut Vec<char>, expression_vec: &mut Vec<Strin
     return None;
 }
 
-pub fn analyse_expression(expression_string: &str, program: &Program) -> Result<AnalysisInfo, String> {
+pub fn analyse_expression(expression_string: &str, program: &Program, strict: bool, attempts: usize) -> Result<AnalysisInfo, String> {
     let expression_strings = process_expression_string(expression_string)?;
     let mut final_analysis_info = AnalysisInfo {
         estimated_complexity: Complexity::Unknown,
         graph_data: Vec::new(),
-        estimated_state_complexities: HashMap::new()
+        estimated_state_complexities: HashMap::new(),
+        state_graph_data: HashMap::new(),
     };
     let analysis_data: Vec<AnalysisInfo> = expression_strings.into_iter()
-        .map(|exp| { Ok(analyse_string(&exp, program)?) })
+        .map(|exp| { Ok(analyse_string(&exp, program, strict, attempts)?) })
         .collect::<Result<Vec<AnalysisInfo>, String>>()?;
 
     // add all worst step counts to a central map
@@ -1162,6 +1164,7 @@ pub fn analyse_expression(expression_string: &str, program: &Program) -> Result<
     // re-estimate global complexity
     final_analysis_info.estimated_complexity = estimate_complexity(&mut final_analysis_info.graph_data);
     
+    let mut final_graph_maps: HashMap<String, HashMap<usize, usize>> = HashMap::new();
     // compile new state complexities for each state based on highest estimated complexity
     for analysed_expression in analysis_data {
         for (state, estimated_complexity) in analysed_expression.estimated_state_complexities {
@@ -1170,21 +1173,39 @@ pub fn analyse_expression(expression_string: &str, program: &Program) -> Result<
                 .and_modify(|current_complexity| *current_complexity = estimated_complexity.max(*current_complexity))
                 .or_insert(estimated_complexity);
         }
+
+        for (state, graph_data) in analysed_expression.state_graph_data {
+            let graph_map = final_graph_maps.entry(state).or_insert_with(|| HashMap::new());
+            for (input_length, steps) in graph_data {
+                graph_map
+                    .entry(input_length)
+                    .and_modify(|current_steps| *current_steps = steps.max(*current_steps))
+                    .or_insert(steps);
+            }
+        }
+    }
+
+    for (state, graph_map) in final_graph_maps {
+        let mut state_graph: Vec<(usize, usize)> = graph_map.into_iter().collect();
+        state_graph.sort_by_key(|&(input_length, _)| input_length);
+        final_analysis_info.state_graph_data.insert(state, state_graph);
     }
 
     return Ok(final_analysis_info);
 }
 
-fn analyse_string(expression_string: &String, program: &Program) -> Result<AnalysisInfo, String> {
+fn analyse_string(expression_string: &String, program: &Program, strict: bool, attempts: usize) -> Result<AnalysisInfo, String> {
     // overall length restriction - refuses to process strings with length greater than this value
     let max_generation_length: usize = 100;
     // overall generation count restriction - stops processing string after point count exceeds this value
     let max_generations: usize = 50;
-    // number of attempts made to generate each point - currently unused and unimplemented
-    let generation_attempts: usize = 5;
 
     let generated_token = ExpressionParser::produce_token(expression_string)?;
-    let generated_strings: Vec<String> = generated_token.generate_strings_in_range(0..max_generation_length, max_generations);
+
+    let mut generated_strings: Vec<String> = Vec::new();
+    for _ in 0..attempts {
+        generated_strings.extend(generated_token.generate_strings_in_range(0..max_generation_length, max_generations));
+    }
 
     // collects a list of (input string, run turing machine, end state) for all strings by running turing machines
     // turing machines contain information about runtime and transition runtime
@@ -1197,6 +1218,12 @@ fn analyse_string(expression_string: &String, program: &Program) -> Result<Analy
                 return None;
             }
             let exit_type = machine.run();
+
+            // do not include rejected inputs
+            if strict && !machine.state().to_lowercase().contains("accept") {
+                return None;
+            }
+
             Some((s, machine, exit_type))
         })
         .collect();
@@ -1230,17 +1257,20 @@ fn analyse_string(expression_string: &String, program: &Program) -> Result<Analy
         }
     }
 
+    let mut state_graph_data: HashMap<String, Vec<(usize, usize)>> = HashMap::new();
     let mut state_complexities: HashMap<String, Complexity> = HashMap::new();
     for (state_name, mut runtimes) in state_runtimes {
         let state_complexity = estimate_complexity(&mut runtimes);
         let bounded_complexity = if state_complexity > overall_complexity { overall_complexity.clone() } else { state_complexity };
-        state_complexities.insert(state_name, bounded_complexity);
+        state_complexities.insert(state_name.clone(), bounded_complexity);
+        state_graph_data.insert(state_name, runtimes);
     }
 
     Ok(AnalysisInfo {
         estimated_complexity: overall_complexity, 
         graph_data: total_runtimes,
-        estimated_state_complexities: state_complexities 
+        estimated_state_complexities: state_complexities,
+        state_graph_data,
     })
 }
 

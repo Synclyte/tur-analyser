@@ -8,6 +8,7 @@ use tur::Program;
 use tur::expression::analyse_expression;
 use tur::expression::{AnalysisInfo, Complexity};
 use web_sys::HtmlTextAreaElement;
+use std::collections::HashMap;
 
 #[derive(Properties, PartialEq)]
 pub struct AnalyserProps {
@@ -16,19 +17,26 @@ pub struct AnalyserProps {
 
 #[derive(Properties, PartialEq)]
 pub struct ChartProps {
+    pub id: String,
     pub data: Vec<(usize, usize)>,
+    #[prop_or_default]
+    pub is_small: bool,
 }
 
 #[wasm_bindgen(module = "/runtime-chart.js")]
 extern "C" {
-    fn draw_runtime_chart(canvas_id: &str, x_data: Vec<f64>, y_data: Vec<f64>);
+    fn draw_runtime_chart(canvas_id: &str, x_data: Vec<f64>, y_data: Vec<f64>, is_small: bool);
 }
 
 #[function_component(RuntimeChart)]
 fn runtime_chart(props: &ChartProps) -> Html {
     let data = props.data.clone();
+    let id = props.id.clone();
+    let is_small = props.is_small.clone();
 
-    use_effect_with(data.clone(), move |points| {
+    let height_style = if is_small { "120px" } else { "320px" };
+
+    use_effect_with((data.clone(), id.clone(), is_small.clone()), move |(points, canvas_id, is_small)| {
         if !points.is_empty() {
             let min_x = points.first().map(|(x, _)| *x).unwrap_or(0);
             let max_x = points.last().map(|(x, _)| *x).unwrap_or(0);
@@ -36,37 +44,49 @@ fn runtime_chart(props: &ChartProps) -> Html {
             let mut x_data: Vec<f64> = Vec::new();
             let mut y_data: Vec<f64> = Vec::new();
 
+            let mut points_map = HashMap::new();
+            for &(x, y) in points.iter() {
+                points_map.entry(x)
+                    .and_modify(|current_y| *current_y = y.max(*current_y))
+                    .or_insert(y);
+            }
+
             let mut current_x = 0;
-            // adds padding for non-continuous points
             for x in min_x..=max_x {
-                let current_data_point = points[current_x];
                 x_data.push(x as f64);
-                // if a value for the current x exists in the graph data, push it
-                // otherwise, push NAN to pad
-                if current_x < points.len() && current_data_point.0 == x {
-                    y_data.push(current_data_point.1 as f64);
-                    current_x += 1;
+                if let Some(&y) = points_map.get(&x) {
+                    y_data.push(y as f64);
                 } else {
                     y_data.push(f64::NAN);
                 }
             }
             
-            draw_runtime_chart("complexity-chart", x_data, y_data);
+            draw_runtime_chart(canvas_id, x_data, y_data, *is_small);
         }
         || ()
     });
 
     html! {
-        <div class="w-full h-80 relative bg-base-100 rounded-box">
-            <canvas id="complexity-chart"></canvas>
+        <div style={format!("width: 100%; position: relative; overflow: hidden; height: {};", height_style)}>
+            <canvas id={props.id.clone()} style="position: absolute; top: 0; left: 0; width: 100%; height: 100%; display: block;"></canvas>
         </div>
     }
 }
 
 #[function_component(ComplexityAnalyser)]
 pub fn complexity_analyser(props: &AnalyserProps) -> Html {
+    // ignores termination-like state names in analysis, as these are only ever visited once - pointless to build a graph to show the user these
+    let ignored_state_names: Vec<String> = vec!["stop".to_string(), "accept".to_string(), "reject".to_string()];
+
+    // holds regex string to be processed
     let regex_input = use_state(|| "".to_string());
+    // encodes whether analysis is currently happening
     let is_analysing = use_state(|| false);
+    // if true, only adds a generated string to the end graph if it terminates in a state containing "accept" in its name
+    let is_strict = use_state(|| false);
+    // number of attempts to make to generate strings for each length. always uses the string with the longest length
+    let generation_attempts = use_state(|| 1);
+    // data passed back from analysis
     let analysis_result = use_state(|| None::<Result<AnalysisInfo, String>>);
 
     let on_input_change = {
@@ -82,11 +102,31 @@ pub fn complexity_analyser(props: &AnalyserProps) -> Html {
         })
     };
 
+    let on_strict_change = {
+        let is_strict = is_strict.clone();
+        Callback::from(move |e: Event| {
+            let target = e.target_unchecked_into::<web_sys::HtmlInputElement>();
+            is_strict.set(target.checked());
+        })
+    };
+
+    let on_attempts_change = {
+        let generation_attempts = generation_attempts.clone();
+        Callback::from(move |e: Event| {
+            let target = e.target_unchecked_into::<web_sys::HtmlSelectElement>();
+            if let Ok(val) = target.value().parse::<usize>() {
+                generation_attempts.set(val);
+            }
+        })
+    };
+
     let on_analyse_click = {
         let regex_input = regex_input.clone();
         let is_analysing = is_analysing.clone();
         let analysis_result = analysis_result.clone();
         let program = props.program.clone();
+        let is_strict = is_strict.clone();
+        let generation_attempts = generation_attempts.clone();
 
         Callback::from(move |_| {
             if regex_input.is_empty() { return; }
@@ -99,9 +139,12 @@ pub fn complexity_analyser(props: &AnalyserProps) -> Html {
             let async_result = analysis_result.clone();
             let async_program = program.clone();
 
+            let async_strict = *is_strict;
+            let async_attempts = *generation_attempts;
+
             wasm_bindgen_futures::spawn_local(async move {
                 let _ = gloo_timers::future::sleep(std::time::Duration::from_millis(15)).await;
-                let result = analyse_expression(&async_regex, &async_program);
+                let result = analyse_expression(&async_regex, &async_program, async_strict, async_attempts);
                 
                 async_result.set(Some(result));
                 async_analysing.set(false);
@@ -129,8 +172,6 @@ pub fn complexity_analyser(props: &AnalyserProps) -> Html {
         })
     };
 
-
-
     html! {
         <div class="card card-compact bg-base-100 mt-4 shadow-md border border-base-200">
             <div class="card-body">
@@ -140,6 +181,9 @@ pub fn complexity_analyser(props: &AnalyserProps) -> Html {
                     {".analyser-header-flex { display: flex; align-items: center; justify-content: space-between; width: 100%; border-bottom: 1px solid rgba(255, 255, 255, 1); padding-bottom: 0.5rem; margin-bottom: 0.5rem; }"}
                     {".analyser-header-flex > button { width: 30px; height: 30px; border-radius: 50%; background-color: rgba(128, 128, 128, 0.3); color: white; border: none; display: flex; align-items: center; justify-content: center; font-size: 18px; cursor: pointer; transition: opacity 0.2s ease; padding: 0; margin: 0; }"}
                     {".analyser-header-flex > button:hover { opacity: 0.5; }"}
+
+                    {".modal-close-btn { position: absolute; top: 12px; right: 12px; background: transparent; border: none; color: inherit; font-size: 24px; width: 32px; height: 32px; border-radius: 50%; cursor: pointer; display: flex; align-items: center; justify-content: center; transition: all 0.2s ease; opacity: 0.7; padding: 0; }"}
+                    {".modal-close-btn:hover { background-color: rgba(128, 128, 128, 0.2); opacity: 1; }"}
                 </style>
                 
                 <div class="analyser-header-flex">
@@ -163,7 +207,33 @@ pub fn complexity_analyser(props: &AnalyserProps) -> Html {
                     placeholder="Enter Regex input generation expression..."
                     style="overflow: hidden;"
                 />
-                <div style="display: flex; justify-content: flex-end; width: 100%; margin-top: 0.75rem;">
+                <div style="display: flex; justify-content: flex-end; width: 100%; margin-top: 0.75rem; gap: 10px;">
+                    <label class="cursor-pointer" style="display: flex; align-items: center; gap: 0.5rem;">
+                        <span class="text-sm">{"Analyse Accepted Only"}</span>
+                        <input 
+                            type="checkbox" 
+                            class="checkbox checkbox-sm checkbox-primary" 
+                            checked={(*is_strict).clone()} 
+                            onchange={on_strict_change} 
+                            disabled={*is_analysing} 
+                        />
+                    </label>
+                        
+                    <div style="display: flex; align-items: center; gap: 0.5rem;">
+                        <span class="text-sm">{"Attempts:"}</span>
+                        <select 
+                            class="select select-bordered select-sm" 
+                            onchange={on_attempts_change} 
+                            disabled={*is_analysing} 
+                            value={(*generation_attempts).clone().to_string()}
+                        >
+                            <option value="1" selected={*generation_attempts == 1}>{"1"}</option>
+                            <option value="2" selected={*generation_attempts == 2}>{"2"}</option>
+                            <option value="5" selected={*generation_attempts == 5}>{"5"}</option>
+                            <option value="10" selected={*generation_attempts == 10}>{"10"}</option>
+                        </select>
+                    </div>
+
                     <button 
                         class="btn btn-primary px-8"
                         onclick={on_analyse_click} 
@@ -181,67 +251,71 @@ pub fn complexity_analyser(props: &AnalyserProps) -> Html {
                                 class="alert alert-error shadow-sm mt-4"
                                 style="padding-top: 30px;"
                             >
-                                <span>{ format!("Error: {}", e) }</span>
+                                <span>{ format!("{}", e) }</span>
                             </div>
                         },
                         Some(Ok(info)) => {
                             let mut sorted_states: Vec<(&String, &Complexity)> = info.estimated_state_complexities
                                 .iter()
-                                .filter(|(state, _)| *state != "start" && *state != "stop")
+                                .filter(|(state, _)| !ignored_state_names.contains(&state.to_lowercase()))
                                 .collect();
 
                             sorted_states.sort_by(|a, b| a.0.cmp(b.0));
 
                             html! {
-                                <div 
-                                    class="grid grid-cols-1 lg:grid-cols-3 gap-8 mt-6 pt-6 border-t border-base-200"
-                                >
-                                    <div class="col-span-1 lg:col-span-2">
-                                        <RuntimeChart data={info.graph_data.clone()} />
+                                <div style="display: flex; flex-wrap: wrap; gap: 2rem; padding-top: 1rem">
+                                    <div style="flex: 1 1 400px; min-width: 0; display: flex; flex-direction: column; gap: 0.75rem;">
+                                        <h3 class="font-bold text-lg text-white" style="margin: 0;">{"Total Runtime Graph"}</h3>
+                                        <RuntimeChart 
+                                            id={"overall-chart".to_string()} 
+                                            data={info.graph_data.clone()} 
+                                            is_small={false}
+                                        />
+
+                                        <h3 class="font-bold text-lg text-white" style="margin-bottom: 0.25rem;">{"Total Time Complexity"}</h3>
+                                        <span class="text-primary" style="font-size: 1.5rem; font-weight: bold;">{ format!("{}", info.estimated_complexity) }</span>
                                     </div>
                                     
-                                    <div class="col-span-1 flex flex-col gap-6 h-full">
-                                        
-                                        <div class="bg-base-200 rounded-box p-6 flex flex-col justify-center items-center border border-base-300 shadow-sm" style="padding-bottom:20px;">
-                                            <h3 class="card-title text-lg text-white mb-3">{"Overall Complexity"}</h3>
-                                            <span class="text-4xl text-primary">{ format!("{}", info.estimated_complexity) }</span>
+                                    <div style="flex: 1 1 400px; min-width: 0; display: flex; flex-direction: column; gap: 1.5rem;">
+                                        <div class="bg-base-200">
+                                            <h3 class="font-bold text-lg text-white" style="margin: 0;">{"State Breakdown"}</h3>
                                         </div>
-                                        
-                                        <div class="flex-grow overflow-hidden rounded-box border border-base-300 bg-base-100 shadow-sm flex flex-col">
+
+                                        <div class="bg-base-100 rounded-box" style="display: flex; flex-direction: column; border: 1px solid rgba(128,128,128,0.2); overflow: hidden;">
                                             
-                                            <div class="bg-base-200 p-4 border-b border-base-300">
-                                                <h3 class="card-title text-lg text-white mb-3">{"State Breakdown"}</h3>
-                                            </div>
-                                            
-                                            <div class="overflow-y-auto" style="max-height: 350px;">
-                                                <div class="border border-base-300 rounded-b-box justify-center" style="display: flex; flex-direction: column; width: 100%;">
-                                                    
-                                                    <div class="bg-base-300 text-white border-b border-base-300" style="display: flex; width: 100%;">
-                                                        <div class="border-r border-base-300 font-bold text-base" style="min-width: 100px; padding: 0.1rem; text-align: left;">
-                                                            {"State Name"}
-                                                        </div>
-                                                        <div class="font-bold text-base" style="min-width: 100px; padding: 0.1rem; text-align: left;">
-                                                            {"Time Complexity"}
-                                                        </div>
-                                                    </div>
-                                                    
-                                                    // THE ROWS
-                                                    <div style="display: flex; flex-direction: column; width: 100%;">
-                                                        { for sorted_states.iter().map(|(state, comp)| html! {
-                                                            <div class="border-b border-base-300 hover:bg-base-200 transition-colors" style="display: flex; width: 100%;">
-                                                                <div class="border-r border-base-300 font-mono text-base" style="min-width: 100px; padding: 0.1rem; display: flex; align-items: center; justify-content: flex-start;">
+                                            <div style="overflow-y: auto; display: flex; flex-direction: column; width: 100%;">
+                                                
+                                                <div class="bg-base-300 text-white" style="display: flex; width: 100%; border-bottom: 1px solid rgba(128,128,128,0.2);">
+                                                    <div style="width: 15%; padding: 0.5rem; font-size: 0.875rem; text-align: center;">{"State"}</div>
+                                                    <div style="width: 15%; padding: 0.5rem; font-size: 0.875rem; text-align: center;">{"Time"}</div>
+                                                    <div style="width: 70%; padding: 0.5rem; font-size: 0.875rem; text-align: center;">{"Runtime Graph"}</div>
+                                                </div>
+                                                
+                                                <div style="display: flex; flex-direction: column; width: 100%;">
+                                                    { for sorted_states.iter().enumerate().map(|(i, (state, comp))| {
+                                                        let state_data = info.state_graph_data.get(*state).cloned().unwrap_or_default();
+
+                                                        html! {
+                                                            <div key={state.to_string()} class="hover:bg-base-200 transition-colors" style="display: flex; width: 100%; border-bottom: 1px solid rgba(128,128,128,0.2);">
+                                                                <div style="width: 15%; padding: 0.5rem; font-family: monospace; font-size: 0.875rem; display: flex; align-items: center; border-right: 1px solid rgba(128,128,128,0.2); overflow: hidden; text-overflow: ellipsis; text-align: center;">
                                                                     { state }
                                                                 </div>
-                                                                <div class="text-primary font-bold text-base" style="min-width: 100px; padding: 0.1rem; display: flex; align-items: center; justify-content: flex-start;">
+                                                                <div class="text-primary" style="width: 15%; padding: 0.5rem; font-weight: bold; font-size: 0.875rem; display: flex; align-items: center; border-right: 1px solid rgba(128,128,128,0.2); overflow: hidden; text-overflow: ellipsis; text-align: center;">
                                                                     { format!("{}", comp) }
                                                                 </div>
+                                                                <div style="width: 70%; padding: 0; position: relative; display: flex; align-items: center;">
+                                                                    <RuntimeChart
+                                                                        id={format!("state-chart-{}", i)}
+                                                                        data={state_data}
+                                                                        is_small={true}
+                                                                    />
+                                                                </div>
                                                             </div>
-                                                        }) }
-                                                    </div>
-                                                    
+                                                        }
+                                                    }) }
                                                 </div>
+                                                
                                             </div>
-                                            
                                         </div>
                                     </div>
                                 </div>
@@ -255,11 +329,11 @@ pub fn complexity_analyser(props: &AnalyserProps) -> Html {
                     class={classes!("modal", if *modal_opened { Some("modal-open") } else { None })}
                     onkeydown={on_modal_keydown}
                 >
-                    <div class="modal-box w-11/12 max-w-3xl relative" onclick={Callback::from(|e: MouseEvent| e.stop_propagation())}>
+                    <div class="modal-box relative" style="min-width: 40%" onclick={Callback::from(|e: MouseEvent| e.stop_propagation())}>
                         <button
-                            class="btn btn-sm btn-circle btn-ghost"
+                            class="modal-close-btn"
                             onclick={close_modal.clone()}
-                            style="position: absolute; top: 12px; right: 12px;"
+                            style="position: absolute; top: 8px; right: 8px; display: flex; align-items: center; justify-content: center; font-size: 18px; line-height: 1; z-index: 10;"
                         >
                             {"×"}
                         </button>
@@ -281,19 +355,42 @@ pub fn complexity_analyser(props: &AnalyserProps) -> Html {
                                 <li class="help-list-item">{"Generate either '0', '1', or '22': "}<code>{"(0|1|22)"}</code></li>
                                 <li class="help-list-item">{"Repeat '0' 10-20 times: "}<code>{"0{10,20}"}</code></li>
                                 <li class="help-list-item">{"A simple generator for binary addition inputs: "} <code>{"$(0|1)*"}</code></li>
-                                <li class="help-list-item">{"A simple even number generator: "}<code>{"(1|0){2}+0"}</code></li>
+                                <li class="help-list-item">{"A simple even number generator: "}<code>{"1(1|0)*0"}</code></li>
                             </ul>
+                            <p class="help-paragraph">
+                                {"Ranges (i.e. a-z) are not supported due to them being generally unnecessary during generation - if a-z is accepted, so is just a."}
+                            </p>
+                            <p class="help-paragraph">
+                                {"Multiple expressions can be provided at once. Expressions should be delimited with the ';' character. Additionally, reserved characters (i.e. {, *, +, ;) can be used 
+                                as literals through escaping with the '\\' character."}
+                            </p>
+
 
                             <h4 class="help-heading">{"Advanced Features:"}</h4>
-                            <p class="help-paragraph">{"Format: "} <code>{"current_symbol -> new_symbol, direction, next_state"}</code></p>
+                            <p class="help-paragraph">{"
+                            Additionally supported are mathematical operations within ranges, supporting variables which are intelligently assigned during analysis. 
+                            This allows for limited context preservation, enabling some more complex Turing Machines to be analysed and partially rectifying the capability gap between 
+                            standard RegEx and Turing Machines. For example:
+                            "}</p>
                             <ul class="help-list">
-                                <li class="help-list-item">{"Directions: "} <code>{"L"}</code> {" (left), "} <code>{"R"}</code> {" (right), "} <code>{"S"}</code> {" (stay)"}</li>
-                                <li class="help-list-item">{"Use "} <code>{"_"}</code> {" as a special symbol to match/write the program's blank symbol (e.g., if blank is ' ', then '_' matches ' ')"}</li>
+                                <li class="help-list-item">{"A generator for outputs of square sizes: "} <code>{"0{n * n}"}</code></li>
+                                <li class="help-list-item">{"A generator for outputs with 1 less 'a' than 'b' than 'c': "} <code>{"a{n}b{n + 1}c{n + 2}"}</code></li>
+                                <li class="help-list-item">{"A generator with specific bounds on outputs: "} <code>{"a{n}b{n * 2 + x}c{x - n}"}</code></li>
+                            </ul>
+                            <p class="help-paragraph">{"
+                            As such, it can be observed that this language has non-regular capabilities through violating the "}<a href="https://en.wikipedia.org/wiki/Pumping_lemma_for_regular_languages" target="_blank" style="text-decoration: underline; color: rgb(142, 155, 255);">{"pumping lemma for regular languages"}</a>
+                            {". There are no specific bounds on the number of variables, but higher numbers of variables and more restrictive bounds may lead to longer processing times or failure to generate outputs.
+                            "}</p>
+                            <p class="help-paragraph">{"
+                            Also given are advanced options next to the Run Analysis button. These function as follows: 
+                            "}</p>
+                            <ul class="help-list">
+                                <li class="help-list-item">{"Analyse Accepted Only: Only adds generated inputs which end in a state containing \"accept\" to the end analysis"}</li>
+                                <li class="help-list-item">{"Attempts: Makes this many attempts to generate each string for each length, keeping the string with the highest runtime. Can lead to more accurate worst-case results at the cost of higher analysis time."}</li>
                             </ul>
                         </div>
                     </div>
                     
-                    // Backdrop click closes the modal
                     <form method="dialog" class="modal-backdrop" onclick={close_modal.clone()}>
                         <button>{"close"}</button>
                     </form>
