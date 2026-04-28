@@ -1,7 +1,7 @@
-use crate::{Program, Step, Transition, TuringMachineError, machine::*, types::MAX_EXECUTION_STEPS};
+use crate::{Program, Step, machine::*, types::MAX_EXECUTION_STEPS};
 
 use std::{collections::{HashMap, HashSet}, f64::consts::E, fmt, hash::Hash, ops::Range, usize, vec};
-use rand::{Rng, rngs::{ThreadRng, StdRng}, seq::{SliceRandom}, SeedableRng};
+use rand::{Rng, rngs::{StdRng}, seq::{SliceRandom}, SeedableRng};
 
 const REPEAT_LIMIT: i32 = 128;
 const ESCAPE_CHAR: char = '\\';
@@ -111,7 +111,6 @@ impl Bound {
     }
 
     // used for debugging with recur_to_string. provides a string representation of a bound
-    #[warn(unused)]
     fn get_string(&self) -> String {
         return match self {
             Bound::Literal(lit) => lit.to_string(),
@@ -468,12 +467,14 @@ impl ExpressionParser {
         return Ok((Token::Repetition(Box::new(token), range.0, range.1), index));
     }
 
+    // used to ensure input string contains no whitespace
     fn format_input_string(&self, c_string: String) -> Vec<char> {
         return c_string.chars()
             .filter(|c| !c.is_whitespace())
             .collect();
     }
 
+    // returns a string representation of a given regex. used for debugging
     pub fn get_string(token: &Token) -> String {
         return Self::recur_to_string(&token, 0);
     }
@@ -762,7 +763,7 @@ impl ContextToken {
     }
 
     /// uses an annealing-based approach to find valid variables based on constraints
-    fn get_valid_variable_values<T: Rng>(&self, target_length: usize, dependency_graph: &DependencyGraph, mut rng: &mut T) -> HashMap<String, i32> {
+    fn get_valid_variable_values<T: Rng>(&self, target_length: usize, dependency_graph: &DependencyGraph, rng: &mut T) -> HashMap<String, i32> {
         // gets the difference between the min/max lengths and the target value
         let calculate_difference_from_target = | variables: &HashMap<String, i32> | -> usize {
             let min_length = self.calculate_min_length(&self.token, variables);
@@ -1029,6 +1030,7 @@ impl ContextToken {
     }
 }
 
+// previously used for debugging
 fn main() {
     let output_token: Result<ContextToken, String> = ExpressionParser::produce_token("(ab|cd|(e{x*2,}|a{,4})|f){,12}a");
     match output_token {

@@ -1,13 +1,8 @@
-use plotters::style::full_palette::GREY_800;
 use wasm_bindgen::prelude::wasm_bindgen;
 use yew::prelude::*;
-use plotters::prelude::*;
-use plotters_canvas::CanvasBackend;
-use web_sys::HtmlCanvasElement;
 use tur::Program;
 use tur::expression::analyse_expression;
 use tur::expression::{AnalysisInfo, Complexity};
-use web_sys::HtmlTextAreaElement;
 use std::collections::HashMap;
 
 #[derive(Properties, PartialEq)]
@@ -51,7 +46,6 @@ fn runtime_chart(props: &ChartProps) -> Html {
                     .or_insert(y);
             }
 
-            let mut current_x = 0;
             for x in min_x..=max_x {
                 x_data.push(x as f64);
                 if let Some(&y) = points_map.get(&x) {
@@ -264,7 +258,7 @@ pub fn complexity_analyser(props: &AnalyserProps) -> Html {
 
                             html! {
                                 <div style="display: flex; flex-wrap: wrap; gap: 2rem; padding-top: 1rem">
-                                    <div style="flex: 1 1 400px; min-width: 0; display: flex; flex-direction: column; gap: 0.75rem;">
+                                    <div style="flex: 1 1 300px; min-width: 0; display: flex; flex-direction: column; gap: 0.75rem;">
                                         <h3 class="font-bold text-lg text-white" style="margin: 0;">{"Total Runtime Graph"}</h3>
                                         <RuntimeChart 
                                             id={"overall-chart".to_string()} 
@@ -276,7 +270,7 @@ pub fn complexity_analyser(props: &AnalyserProps) -> Html {
                                         <span class="text-primary" style="font-size: 1.5rem; font-weight: bold;">{ format!("{}", info.estimated_complexity) }</span>
                                     </div>
                                     
-                                    <div style="flex: 1 1 400px; min-width: 0; display: flex; flex-direction: column; gap: 1.5rem;">
+                                    <div style="flex: 1 1 350px; min-width: 0; display: flex; flex-direction: column; gap: 1.5rem;">
                                         <div class="bg-base-200">
                                             <h3 class="font-bold text-lg text-white" style="margin: 0;">{"State Breakdown"}</h3>
                                         </div>
