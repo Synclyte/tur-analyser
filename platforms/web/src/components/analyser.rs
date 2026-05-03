@@ -123,7 +123,7 @@ pub fn complexity_analyser(props: &AnalyserProps) -> Html {
         let generation_attempts = generation_attempts.clone();
 
         Callback::from(move |_| {
-            if regex_input.is_empty() { return; }
+            if regex_input.is_empty() || !program.is_single_tape() { return; }
 
             is_analysing.set(true);
             analysis_result.set(None);
@@ -323,7 +323,7 @@ pub fn complexity_analyser(props: &AnalyserProps) -> Html {
                     class={classes!("modal", if *modal_opened { Some("modal-open") } else { None })}
                     onkeydown={on_modal_keydown}
                 >
-                    <div class="modal-box relative" style="min-width: 40%" onclick={Callback::from(|e: MouseEvent| e.stop_propagation())}>
+                    <div class="modal-box relative" style="min-width: 50%; max-height: 90%;" onclick={Callback::from(|e: MouseEvent| e.stop_propagation())}>
                         <button
                             class="modal-close-btn"
                             onclick={close_modal.clone()}
@@ -340,6 +340,9 @@ pub fn complexity_analyser(props: &AnalyserProps) -> Html {
                             This can require a large number of inputs to do correctly, and many simple Turing Machines are highly formulaic, making this a waste of time.
                             Therefore, a variant of regular expressions can be used here to automatically generate expressions.
                             "}</p>
+                            <p class="help-paragraph">{"
+                            This analyser currently only supports single-tape Turing Machines.
+                            "}</p>
 
                             <h4 class="help-heading">{"Regular Expressions:"}</h4>
                             <p class="help-paragraph">{"
@@ -348,7 +351,7 @@ pub fn complexity_analyser(props: &AnalyserProps) -> Html {
                             <ul class="help-list">
                                 <li class="help-list-item">{"Generate either '0', '1', or '22': "}<code>{"(0|1|22)"}</code></li>
                                 <li class="help-list-item">{"Repeat '0' 10-20 times: "}<code>{"0{10,20}"}</code></li>
-                                <li class="help-list-item">{"A simple generator for binary addition inputs: "} <code>{"$(0|1)*"}</code></li>
+                                <li class="help-list-item">{"A simple generator for worst-case binary addition inputs: "} <code>{"$(1)*"}</code></li>
                                 <li class="help-list-item">{"A simple even number generator: "}<code>{"1(1|0)*0"}</code></li>
                             </ul>
                             <p class="help-paragraph">
