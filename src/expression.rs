@@ -1,11 +1,16 @@
 use crate::{Program, Step, Transition, TuringMachineError, machine::*, types::MAX_EXECUTION_STEPS};
 
 use std::{collections::{HashMap, HashSet}, f64::consts::E, fmt, hash::Hash, ops::Range, usize, vec};
-use rand::{Rng, rngs::{ThreadRng, StdRng}, seq::{SliceRandom}, SeedableRng};
+use rand::{Rng, SeedableRng, rngs::{StdRng, ThreadRng}, seq::{IndexedRandom, SliceRandom}};
 
+// constants related to regex-based string generation
 const REPEAT_LIMIT: i32 = 128;
 const ESCAPE_CHAR: char = '\\';
 const DELIMITER_CHAR: char = ';';
+
+// constants related to GA-based string generation
+const POPULATION_SIZE: usize = 50;
+const MAX_GENERATIONS: usize = 20;
 
 // token struct for representing regular expressions
 // covers all basic regex operations 
@@ -164,7 +169,7 @@ impl ExpressionParser {
     }
 
     /// takes a string as input, and returns either the resulting tokenised regular expression, or a string-based error. main function of ExpressionParser
-    pub fn produce_token(expression: &str) -> Result<ContextToken, String> {
+    fn produce_token(expression: &str) -> Result<ContextToken, String> {
         let mut parser: ExpressionParser = ExpressionParser::new();
         let mut cleaned_vector_expression: Vec<char> = expression.chars().filter(|c| !c.is_whitespace()).collect();
         let output_token: Token = Self::parse_chars(&mut parser, &mut cleaned_vector_expression, '\0', 0)?.0;
@@ -474,7 +479,7 @@ impl ExpressionParser {
             .collect();
     }
 
-    pub fn get_string(token: &Token) -> String {
+    fn get_string(token: &Token) -> String {
         return Self::recur_to_string(&token, 0);
     }
 
@@ -1037,6 +1042,11 @@ fn main() {
     }
 }
 
+struct RuntimeInfo {
+    pub graph_data: Vec<(usize, usize)>,
+    pub state_graph_data: HashMap<String, Vec<(usize, usize)>>
+}
+
 pub struct AnalysisInfo {
     pub estimated_complexity: Complexity,
     pub graph_data: Vec<(usize, usize)>,
@@ -1133,19 +1143,15 @@ fn push_buffer(expression_buffer: &mut Vec<char>, expression_vec: &mut Vec<Strin
     return None;
 }
 
-pub fn analyse_expression(expression_string: &str, program: &Program, strict: bool, attempts: usize) -> Result<AnalysisInfo, String> {
-    let expression_strings = process_expression_string(expression_string)?;
+fn compile_analysis(analysis_data: Vec<RuntimeInfo>) -> AnalysisInfo {
     let mut final_analysis_info = AnalysisInfo {
         estimated_complexity: Complexity::Unknown,
         graph_data: Vec::new(),
         estimated_state_complexities: HashMap::new(),
         state_graph_data: HashMap::new(),
     };
-    let analysis_data: Vec<AnalysisInfo> = expression_strings.into_iter()
-        .map(|exp| { Ok(analyse_string(&exp, program, strict, attempts)?) })
-        .collect::<Result<Vec<AnalysisInfo>, String>>()?;
 
-    // add all worst step counts to a central map
+    // add all worst step counts to a central map - cleans data, removes duplicates for a given length
     let mut final_graph_map: HashMap<usize, usize> = HashMap::new();
     for analysed_expression in &analysis_data {
         for &(input_length, steps) in &analysed_expression.graph_data {
@@ -1156,25 +1162,22 @@ pub fn analyse_expression(expression_string: &str, program: &Program, strict: bo
         }
     }
 
-    // convert the map back into a vector and sort it
     let mut final_graph: Vec<(usize, usize)> = final_graph_map.into_iter().collect();
     final_graph.sort_by_key(|&(input_length, _)| input_length);
 
     final_analysis_info.graph_data = final_graph;
-    // re-estimate global complexity
     final_analysis_info.estimated_complexity = estimate_complexity(&mut final_analysis_info.graph_data);
-    
-    let mut final_graph_maps: HashMap<String, HashMap<usize, usize>> = HashMap::new();
-    // compile new state complexities for each state based on highest estimated complexity
-    for analysed_expression in analysis_data {
-        for (state, estimated_complexity) in analysed_expression.estimated_state_complexities {
-            final_analysis_info.estimated_state_complexities
-                .entry(state)
-                .and_modify(|current_complexity| *current_complexity = estimated_complexity.max(*current_complexity))
-                .or_insert(estimated_complexity);
-        }
 
-        for (state, graph_data) in analysed_expression.state_graph_data {
+    let mut final_graph_maps: HashMap<String, HashMap<usize, usize>> = HashMap::new();
+    // compile state complexities for each state capped by highest estimated complexity
+    for analysed_expression in analysis_data {
+        for (state, mut graph_data) in analysed_expression.state_graph_data {
+            let estimated_complexity = estimate_complexity(&mut graph_data);
+            final_analysis_info.estimated_state_complexities
+                .entry(state.clone())
+                .and_modify(|current_complexity | *current_complexity = final_analysis_info.estimated_complexity.min(estimated_complexity))
+                .or_insert(Complexity::Unknown);
+            
             let graph_map = final_graph_maps.entry(state).or_insert_with(|| HashMap::new());
             for (input_length, steps) in graph_data {
                 graph_map
@@ -1185,93 +1188,40 @@ pub fn analyse_expression(expression_string: &str, program: &Program, strict: bo
         }
     }
 
+    // orders state length/input size pairs for graphing
     for (state, graph_map) in final_graph_maps {
         let mut state_graph: Vec<(usize, usize)> = graph_map.into_iter().collect();
         state_graph.sort_by_key(|&(input_length, _)| input_length);
         final_analysis_info.state_graph_data.insert(state, state_graph);
     }
 
-    return Ok(final_analysis_info);
+    return final_analysis_info;
 }
 
-fn analyse_string(expression_string: &String, program: &Program, strict: bool, attempts: usize) -> Result<AnalysisInfo, String> {
-    // overall length restriction - refuses to process strings with length greater than this value
-    let max_generation_length: usize = 100;
-    // overall generation count restriction - stops processing string after point count exceeds this value
-    let max_generations: usize = 50;
+pub fn analyse_expression(expression_string: &str, program: &Program, strict: bool, attempts: usize) -> Result<AnalysisInfo, String> {
+    let max_generation_length = 100;
+    let max_generations = 50;
 
-    let generated_token = ExpressionParser::produce_token(expression_string)?;
+    let expression_strings = process_expression_string(expression_string)?;
+    let mut analysis_data: Vec<RuntimeInfo> = Vec::new();
 
-    let mut generated_strings: Vec<String> = Vec::new();
-    for _ in 0..attempts {
-        generated_strings.extend(generated_token.generate_strings_in_range(0..max_generation_length, max_generations));
-    }
+    for expression in expression_strings {
+        let token = ExpressionParser::produce_token(&expression)?;
+        let mut generated_inputs = Vec::new();
 
-    // collects a list of (input string, run turing machine, end state) for all strings by running turing machines
-    // turing machines contain information about runtime and transition runtime
-    // end state allows machines to be filtered based on whether they are assessed to terminate
-    // this allows for empirical time complexity analysis
-    let machine_runtimes: Vec<(&String, TuringMachine, Step)> = generated_strings.iter()
-        .filter_map(|s| {
-            let mut machine = TuringMachine::new(program.clone());
-            if machine.set_tape_content(0, s).is_err() {
-                return None;
-            }
-            let exit_type = machine.run();
-
-            // do not include rejected inputs
-            if strict && !machine.state().to_lowercase().contains("accept") {
-                return None;
-            }
-
-            Some((s, machine, exit_type))
-        })
-        .collect();
-
-    if machine_runtimes.is_empty() {
-        return Err("Error: Failed to simulate Turing Machine - no valid outputs found".into());
-    }
-
-    // through comparing the average squared error of various time complexity functions to the actual runtime functions
-    // a good estimate for time complexity of functions and transitions can be estimated
-    // accuracy increases with increased generation count
-    let mut total_runtimes: Vec<(usize, usize)> = machine_runtimes.iter()
-        .map(| (input_string, machine, _) | (input_string.len(), machine.step_count()))
-        .collect();
-
-    let overall_complexity = estimate_complexity(&mut total_runtimes);
-
-    // encode state runtimes in a hashmap mapping state name -> (input length, state runtime)
-    let mut state_runtimes: HashMap<String, Vec<(usize, usize)>> = HashMap::new();
-
-    // fully populates state runtimes
-    for (input_string, machine, _) in machine_runtimes {
-        let length: usize = input_string.len();
-        let transition_steps: &HashMap<String, usize> = machine.get_transition_steps();
-        for state_name in machine.get_program().rules.keys() {
-            let steps = transition_steps.get(state_name).copied().unwrap_or(0);
-            // produces a new Vec<(usize, usize)> if empty, and adds the (length, steps) pair to it
-            state_runtimes.entry(state_name.clone())
-                .or_default()
-                .push((length, steps));
+        for _ in 0..attempts {
+            generated_inputs.extend(token.generate_strings_in_range(0..max_generation_length, max_generations));
         }
+
+        let runtime_info: RuntimeInfo = evaluate_inputs(generated_inputs, program, strict);
+        if runtime_info.graph_data.is_empty() {
+            return Err(format!("Error: Failed to simulate Turing Machine for expression '{}' - no valid outputs found", expression));
+        }
+
+        analysis_data.push(runtime_info);
     }
 
-    let mut state_graph_data: HashMap<String, Vec<(usize, usize)>> = HashMap::new();
-    let mut state_complexities: HashMap<String, Complexity> = HashMap::new();
-    for (state_name, mut runtimes) in state_runtimes {
-        let state_complexity = estimate_complexity(&mut runtimes);
-        let bounded_complexity = if state_complexity > overall_complexity { overall_complexity.clone() } else { state_complexity };
-        state_complexities.insert(state_name.clone(), bounded_complexity);
-        state_graph_data.insert(state_name, runtimes);
-    }
-
-    Ok(AnalysisInfo {
-        estimated_complexity: overall_complexity, 
-        graph_data: total_runtimes,
-        estimated_state_complexities: state_complexities,
-        state_graph_data,
-    })
+    Ok(compile_analysis(analysis_data))
 }
 
 fn estimate_complexity(machine_points: &mut Vec<(usize, usize)>) -> Complexity {
@@ -1321,6 +1271,145 @@ fn estimate_complexity(machine_points: &mut Vec<(usize, usize)>) -> Complexity {
     }
 
     best_complexity
+}
+
+fn extract_alphabet(program: &Program) -> Result<Vec<char>, String> {
+    let mut alphabet: Vec<char> = program.rules.values()
+        .flat_map(|transition| transition.iter().flat_map(|t| t.read.clone()))
+        .filter(|&c| c != program.blank)
+        .collect::<HashSet<char>>()
+        .into_iter()
+        .collect::<Vec<char>>();
+
+    alphabet.sort();
+
+    if alphabet.is_empty() {
+        return Err("Error: Could not find valid alphabet from provided Turing Machine".into());
+    }
+    Ok(alphabet)
+}
+
+pub fn analyse_automatic(program: &Program, max_length: usize, strict: bool, attempts: usize) -> Result<AnalysisInfo, String> {
+    // produces an alphabet from transitions to use as chromosones in GA
+    let inferred_alphabet: Vec<char> = extract_alphabet(program)?;
+
+    let mut best_inputs = Vec::new();
+    for length in 1..=max_length {
+        let best_input = generate_genetically(program, length, strict, &inferred_alphabet);
+        if !best_input.is_empty() {
+            best_inputs.push(best_input);
+        }
+    }
+
+    let runtime_info = evaluate_inputs(best_inputs, program, strict);
+
+    Ok(compile_analysis(vec![runtime_info]))
+}
+
+fn evaluate_inputs(inputs: Vec<String>, program: &Program, strict: bool) -> RuntimeInfo {
+    let mut total_runtimes = Vec::new();
+    let mut state_runtimes_map: HashMap<String, Vec<(usize, usize)>> = HashMap::new();
+
+    for input in inputs {
+        let mut machine = TuringMachine::new(program.clone());
+        if machine.set_tape_content(0, &input).is_err() {
+            continue;
+        }
+
+        machine.run();
+
+        if strict && !machine.state().to_lowercase().contains("accept") {
+            continue;
+        }
+
+        let length = input.len();
+        let steps = machine.step_count();
+
+        total_runtimes.push((length, steps));
+        let transition_steps = machine.get_transition_steps();
+        for state_name in program.rules.keys() {
+            let state_steps = transition_steps.get(state_name).copied().unwrap_or(0);
+            state_runtimes_map.entry(state_name.clone())
+                .or_default()
+                .push((length, state_steps));
+        }
+    }
+
+    RuntimeInfo { 
+        graph_data: total_runtimes, 
+        state_graph_data: state_runtimes_map 
+    }
+}
+
+fn generate_genetically(program: &Program, length: usize, strict: bool, alphabet: &Vec<char>) -> String {
+    let mut rng = rand::rng();
+
+    let mut population: Vec<String> = (0..POPULATION_SIZE)
+        .map(|_| (0..length).map(|_| *alphabet.choose(&mut rng).unwrap()).collect())
+        .collect();
+
+    let mut current_best_string: String = String::new();
+    let mut current_best_fitness: usize = 0;
+
+    for _ in 0..MAX_GENERATIONS {
+        // evaluate fitness of current generation
+        let mut evaluation_tuple: Vec<(String, usize)> = population.into_iter().map(|s| {
+            let fitness = calculate_fitness(program, &s, strict);
+            (s, fitness)
+        }).collect();
+
+        evaluation_tuple.sort_by_key(|&(_, fitness)| fitness);
+
+        // update best string seen so far
+        let generation_best_string = evaluation_tuple.last().unwrap();
+        if generation_best_string.1 > current_best_fitness {
+            current_best_fitness = generation_best_string.1;
+            current_best_string = generation_best_string.0.clone();
+        }
+
+        // simulate suvival of the fittest (keeps top 50%)
+        let survivors = &evaluation_tuple[POPULATION_SIZE / 2..];
+        // always preserves the best string from the previous generation
+        let mut next_generation = vec![generation_best_string.0.clone()];
+
+        while next_generation.len() < POPULATION_SIZE {
+            // chooses 2 random distinct "parents"
+            let parents: Vec<&(String, usize)> = survivors.choose_multiple(&mut rng, 2).collect();
+
+            let parent_a = &parents[0].0;
+            let parent_b = &parents[1].0;
+
+            let crossover_point = rng.random_range(0..=length);
+            let mut child = format!("{}{}", &parent_a[..crossover_point], &parent_b[crossover_point..]);
+
+            // 10% base mutation chance
+            if length > 0 && rng.random_bool(0.1) {
+                let mutation_point = rng.random_range(0..length);
+                let new_char = *alphabet.choose(&mut rng).unwrap();
+                child.replace_range(mutation_point..=mutation_point, &new_char.to_string());
+            }
+
+            next_generation.push(child);
+        }
+
+        population = next_generation;
+    }
+
+    current_best_string
+}
+
+fn calculate_fitness(program: &Program, input: &str, strict: bool) -> usize {
+    let mut machine = TuringMachine::new(program.clone());
+    // if input is invalid, disqualify
+    if machine.set_tape_content(0, input).is_err() { return 0; }
+
+    machine.run();
+
+    // if mode is strict and this input was not accepted, disqualify
+    if strict && !machine.state().to_lowercase().contains("accept") { return 0; }
+
+    // otherwise, return the step count as the fitness value
+    machine.step_count()
 }
 
 #[cfg(test)]
