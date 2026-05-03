@@ -1,13 +1,8 @@
-use plotters::style::full_palette::GREY_800;
 use wasm_bindgen::prelude::wasm_bindgen;
 use yew::prelude::*;
-use plotters::prelude::*;
-use plotters_canvas::CanvasBackend;
-use web_sys::HtmlCanvasElement;
 use tur::Program;
 use tur::expression::analyse_expression;
 use tur::expression::{AnalysisInfo, Complexity};
-use web_sys::HtmlTextAreaElement;
 use std::collections::HashMap;
 
 #[derive(Properties, PartialEq)]
@@ -51,7 +46,6 @@ fn runtime_chart(props: &ChartProps) -> Html {
                     .or_insert(y);
             }
 
-            let mut current_x = 0;
             for x in min_x..=max_x {
                 x_data.push(x as f64);
                 if let Some(&y) = points_map.get(&x) {
@@ -129,7 +123,7 @@ pub fn complexity_analyser(props: &AnalyserProps) -> Html {
         let generation_attempts = generation_attempts.clone();
 
         Callback::from(move |_| {
-            if regex_input.is_empty() { return; }
+            if regex_input.is_empty() || !program.is_single_tape() { return; }
 
             is_analysing.set(true);
             analysis_result.set(None);
@@ -264,7 +258,7 @@ pub fn complexity_analyser(props: &AnalyserProps) -> Html {
 
                             html! {
                                 <div style="display: flex; flex-wrap: wrap; gap: 2rem; padding-top: 1rem">
-                                    <div style="flex: 1 1 400px; min-width: 0; display: flex; flex-direction: column; gap: 0.75rem;">
+                                    <div style="flex: 1 1 300px; min-width: 0; display: flex; flex-direction: column; gap: 0.75rem;">
                                         <h3 class="font-bold text-lg text-white" style="margin: 0;">{"Total Runtime Graph"}</h3>
                                         <RuntimeChart 
                                             id={"overall-chart".to_string()} 
@@ -276,7 +270,7 @@ pub fn complexity_analyser(props: &AnalyserProps) -> Html {
                                         <span class="text-primary" style="font-size: 1.5rem; font-weight: bold;">{ format!("{}", info.estimated_complexity) }</span>
                                     </div>
                                     
-                                    <div style="flex: 1 1 400px; min-width: 0; display: flex; flex-direction: column; gap: 1.5rem;">
+                                    <div style="flex: 1 1 350px; min-width: 0; display: flex; flex-direction: column; gap: 1.5rem;">
                                         <div class="bg-base-200">
                                             <h3 class="font-bold text-lg text-white" style="margin: 0;">{"State Breakdown"}</h3>
                                         </div>
@@ -329,7 +323,7 @@ pub fn complexity_analyser(props: &AnalyserProps) -> Html {
                     class={classes!("modal", if *modal_opened { Some("modal-open") } else { None })}
                     onkeydown={on_modal_keydown}
                 >
-                    <div class="modal-box relative" style="min-width: 40%" onclick={Callback::from(|e: MouseEvent| e.stop_propagation())}>
+                    <div class="modal-box relative" style="min-width: 50%; max-height: 90%;" onclick={Callback::from(|e: MouseEvent| e.stop_propagation())}>
                         <button
                             class="modal-close-btn"
                             onclick={close_modal.clone()}
@@ -346,6 +340,9 @@ pub fn complexity_analyser(props: &AnalyserProps) -> Html {
                             This can require a large number of inputs to do correctly, and many simple Turing Machines are highly formulaic, making this a waste of time.
                             Therefore, a variant of regular expressions can be used here to automatically generate expressions.
                             "}</p>
+                            <p class="help-paragraph">{"
+                            This analyser currently only supports single-tape Turing Machines.
+                            "}</p>
 
                             <h4 class="help-heading">{"Regular Expressions:"}</h4>
                             <p class="help-paragraph">{"
@@ -354,7 +351,7 @@ pub fn complexity_analyser(props: &AnalyserProps) -> Html {
                             <ul class="help-list">
                                 <li class="help-list-item">{"Generate either '0', '1', or '22': "}<code>{"(0|1|22)"}</code></li>
                                 <li class="help-list-item">{"Repeat '0' 10-20 times: "}<code>{"0{10,20}"}</code></li>
-                                <li class="help-list-item">{"A simple generator for binary addition inputs: "} <code>{"$(0|1)*"}</code></li>
+                                <li class="help-list-item">{"A simple generator for worst-case binary addition inputs: "} <code>{"$(1)*"}</code></li>
                                 <li class="help-list-item">{"A simple even number generator: "}<code>{"1(1|0)*0"}</code></li>
                             </ul>
                             <p class="help-paragraph">
