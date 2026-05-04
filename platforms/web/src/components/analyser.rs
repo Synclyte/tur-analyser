@@ -1,8 +1,7 @@
 use wasm_bindgen::prelude::wasm_bindgen;
 use yew::prelude::*;
 use tur::Program;
-use tur::expression::analyse_expression;
-use tur::expression::{AnalysisInfo, Complexity};
+use tur::expression::{analyse_expression, analyse_automatic, AnalysisInfo, Complexity};
 use std::collections::HashMap;
 
 #[derive(Properties, PartialEq)]
@@ -14,30 +13,33 @@ pub struct AnalyserProps {
 pub struct ChartProps {
     pub id: String,
     pub data: Vec<(usize, usize)>,
+    pub input_map: HashMap<usize, String>,
     #[prop_or_default]
     pub is_small: bool,
 }
 
 #[wasm_bindgen(module = "/runtime-chart.js")]
 extern "C" {
-    fn draw_runtime_chart(canvas_id: &str, x_data: Vec<f64>, y_data: Vec<f64>, is_small: bool);
+    fn draw_runtime_chart(canvas_id: &str, x_data: Vec<f64>, y_data: Vec<f64>, string_data: Vec<String>, is_small: bool);
 }
 
 #[function_component(RuntimeChart)]
 fn runtime_chart(props: &ChartProps) -> Html {
     let data = props.data.clone();
+    let input_map = props.input_map.clone();
     let id = props.id.clone();
     let is_small = props.is_small.clone();
 
     let height_style = if is_small { "120px" } else { "320px" };
 
-    use_effect_with((data.clone(), id.clone(), is_small.clone()), move |(points, canvas_id, is_small)| {
+    use_effect_with((data.clone(), input_map.clone(), id.clone(), is_small.clone()), move |(points, map, canvas_id, is_small)| {
         if !points.is_empty() {
             let min_x = points.first().map(|(x, _)| *x).unwrap_or(0);
             let max_x = points.last().map(|(x, _)| *x).unwrap_or(0);
 
             let mut x_data: Vec<f64> = Vec::new();
             let mut y_data: Vec<f64> = Vec::new();
+            let mut string_data: Vec<String> = Vec::new();
 
             let mut points_map = HashMap::new();
             for &(x, y) in points.iter() {
@@ -50,12 +52,15 @@ fn runtime_chart(props: &ChartProps) -> Html {
                 x_data.push(x as f64);
                 if let Some(&y) = points_map.get(&x) {
                     y_data.push(y as f64);
+                    let input_string = map.get(&x).cloned().unwrap_or_default();
+                    string_data.push(input_string);
                 } else {
                     y_data.push(f64::NAN);
+                    string_data.push("".to_string());
                 }
             }
             
-            draw_runtime_chart(canvas_id, x_data, y_data, *is_small);
+            draw_runtime_chart(canvas_id, x_data, y_data, string_data, *is_small);
         }
         || ()
     });
@@ -82,6 +87,13 @@ pub fn complexity_analyser(props: &AnalyserProps) -> Html {
     let generation_attempts = use_state(|| 1);
     // data passed back from analysis
     let analysis_result = use_state(|| None::<Result<AnalysisInfo, String>>);
+    // specifies whether to use automatic analysis (genetic algorithms) or manual analysis (regex) in analysis input
+    let is_automatic = use_state(|| true);
+    // specifies whether to use reduced, more performant settings for the genetic algorithm
+    let is_low_performance = use_state(|| false);
+    // specifies restrictions to input alphabet - many TMs use some alphabet characters as markers
+    // so assuming the entire alphabet is usable can often make GAs fail
+    let allowed_alphabet = use_state(|| "".to_string());
 
     let on_input_change = {
         let regex_input = regex_input.clone();
@@ -114,6 +126,30 @@ pub fn complexity_analyser(props: &AnalyserProps) -> Html {
         })
     };
 
+    let on_toggle_auto = {
+        let is_automatic = is_automatic.clone();
+        Callback::from(move |_e: MouseEvent| {
+            let current_value = *is_automatic;
+            is_automatic.set(!current_value);
+        })
+    };
+
+    let on_performance_change = {
+        let is_low_performance = is_low_performance.clone();
+        Callback::from(move |e: Event| {
+            let target = e.target_unchecked_into::<web_sys::HtmlInputElement>();
+            is_low_performance.set(target.checked());
+        })
+    };
+
+    let on_alphabet_change = {
+        let allowed_alphabet = allowed_alphabet.clone();
+        Callback::from(move |e: InputEvent| {
+            let target = e.target_unchecked_into::<web_sys::HtmlInputElement>();
+            allowed_alphabet.set(target.value());
+        })
+    };
+
     let on_analyse_click = {
         let regex_input = regex_input.clone();
         let is_analysing = is_analysing.clone();
@@ -121,9 +157,12 @@ pub fn complexity_analyser(props: &AnalyserProps) -> Html {
         let program = props.program.clone();
         let is_strict = is_strict.clone();
         let generation_attempts = generation_attempts.clone();
+        let is_automatic = is_automatic.clone();
+        let is_low_performance = is_low_performance.clone();
+        let allowed_alphabet = allowed_alphabet.clone();
 
         Callback::from(move |_| {
-            if regex_input.is_empty() || !program.is_single_tape() { return; }
+            if (!*is_automatic && regex_input.is_empty()) || !program.is_single_tape() { return; }
 
             is_analysing.set(true);
             analysis_result.set(None);
@@ -135,10 +174,18 @@ pub fn complexity_analyser(props: &AnalyserProps) -> Html {
 
             let async_strict = *is_strict;
             let async_attempts = *generation_attempts;
+            let async_auto = *is_automatic;
+            let async_performance = *is_low_performance;
+            let async_alphabet = (*allowed_alphabet).clone();
 
             wasm_bindgen_futures::spawn_local(async move {
                 let _ = gloo_timers::future::sleep(std::time::Duration::from_millis(15)).await;
-                let result = analyse_expression(&async_regex, &async_program, async_strict, async_attempts);
+
+                let result = if async_auto {
+                    analyse_automatic(&async_program, async_strict, async_performance, async_alphabet)
+                } else {
+                    analyse_expression(&async_regex, &async_program, async_strict, async_attempts)
+                };
                 
                 async_result.set(Some(result));
                 async_analysing.set(false);
@@ -146,22 +193,34 @@ pub fn complexity_analyser(props: &AnalyserProps) -> Html {
         })
     };
 
-    let modal_opened = use_state(|| false);
-    let open_modal = {
-        let modal_opened = modal_opened.clone();
-        Callback::from(move |_e: MouseEvent| modal_opened.set(true))
+    let regex_modal_opened = use_state(|| false);
+    let ga_modal_opened = use_state(|| false);
+
+    let open_regex_modal = {
+        let regex_modal_opened = regex_modal_opened.clone();
+        Callback::from(move |_e: MouseEvent| regex_modal_opened.set(true))
+    };
+    let close_regex_modal = {
+        let regex_modal_opened = regex_modal_opened.clone();
+        Callback::from(move |_e: MouseEvent| regex_modal_opened.set(false))
     };
 
-    let close_modal = {
-        let modal_opened = modal_opened.clone();
-        Callback::from(move |_e: MouseEvent| modal_opened.set(false))
+    let open_ga_modal = {
+        let ga_modal_opened = ga_modal_opened.clone();
+        Callback::from(move |_e: MouseEvent| ga_modal_opened.set(true))
+    };
+    let close_ga_modal = {
+        let ga_modal_opened = ga_modal_opened.clone();
+        Callback::from(move |_e: MouseEvent| ga_modal_opened.set(false))
     };
 
     let on_modal_keydown = {
-        let modal_opened = modal_opened.clone();
+        let regex_modal_opened = regex_modal_opened.clone();
+        let ga_modal_opened = ga_modal_opened.clone();
         Callback::from(move |e: KeyboardEvent| {
             if e.key() == "Escape" {
-                modal_opened.set(false);
+                regex_modal_opened.set(false);
+                ga_modal_opened.set(false);
             }
         })
     };
@@ -173,8 +232,11 @@ pub fn complexity_analyser(props: &AnalyserProps) -> Html {
                 // this forces base css to apply the styles instead
                 <style>
                     {".analyser-header-flex { display: flex; align-items: center; justify-content: space-between; width: 100%; border-bottom: 1px solid rgba(255, 255, 255, 1); padding-bottom: 0.5rem; margin-bottom: 0.5rem; }"}
-                    {".analyser-header-flex > button { width: 30px; height: 30px; border-radius: 50%; background-color: rgba(128, 128, 128, 0.3); color: white; border: none; display: flex; align-items: center; justify-content: center; font-size: 18px; cursor: pointer; transition: opacity 0.2s ease; padding: 0; margin: 0; }"}
-                    {".analyser-header-flex > button:hover { opacity: 0.5; }"}
+                    {".help-btn { width: 30px; height: 30px; border-radius: 50%; background-color: rgba(128, 128, 128, 0.3); color: white; border: none; display: flex; align-items: center; justify-content: center; font-size: 18px; cursor: pointer; transition: opacity 0.2s ease; padding: 0; margin: 0; }"}
+                    {".help-btn:hover { opacity: 0.5; }"}
+
+                    {".regex-help-btn { background-color: var(--color-warning); color: var(--color-warning-content)}"}
+                    {".ga-help-btn { background-color: var(--color-success); }"}
 
                     {".modal-close-btn { position: absolute; top: 12px; right: 12px; background: transparent; border: none; color: inherit; font-size: 24px; width: 32px; height: 32px; border-radius: 50%; cursor: pointer; display: flex; align-items: center; justify-content: center; transition: all 0.2s ease; opacity: 0.7; padding: 0; }"}
                     {".modal-close-btn:hover { background-color: rgba(128, 128, 128, 0.2); opacity: 1; }"}
@@ -184,24 +246,98 @@ pub fn complexity_analyser(props: &AnalyserProps) -> Html {
                     <h3 class="card-title text-lg" style="margin: 0;">
                         {"Complexity Analysis"}
                     </h3>
-                    <button
-                        onclick={open_modal}
-                        title="Help"
-                    >
-                        {"?"}
-                    </button>
+                    <div class="m-4 b-4" style="display: flex; justify-content: right; align-items: center; gap: 10px;">
+                        <button
+                            class={format!("btn {}", if *is_automatic { "btn-success" } else { "btn-warning" })}
+                            onclick={on_toggle_auto}
+                            disabled={*is_analysing}
+                            style="width: 80px;"
+                        >
+                            { if *is_automatic { "Genetic" } else { "RegEx" } }
+                        </button>
+                        { if !*is_automatic {
+                            html! {
+                                <button
+                                    onclick={open_regex_modal}
+                                    class="help-btn regex-help-btn"
+                                    title="RegEx Help"
+                                >
+                                    {"?"}
+                                </button>
+                            }
+                        } else {
+                            html! {
+                                <button
+                                    onclick={open_ga_modal}
+                                    class="help-btn ga-help-btn"
+                                    title="Genetic Algorithm Help"
+                                >
+                                    {"?"}
+                                </button>
+                            }
+                        }}
+                    </div>
                 </div>
-                
-                <textarea 
-                    class="textarea textarea-bordered w-full font-mono text-sm shadow-inner resize-none leading-relaxed"
-                    rows="2"
-                    value={(*regex_input).clone()}
-                    oninput={on_input_change}
-                    disabled={*is_analysing}
-                    placeholder="Enter Regex input generation expression..."
-                    style="overflow: hidden;"
-                />
-                <div style="display: flex; justify-content: flex-end; width: 100%; margin-top: 0.75rem; gap: 10px;">
+
+                { if *is_automatic {
+                    html! {
+                        <div style="display: flex; flex-direction: column; gap: 15px; width: 100%;">
+                            <input 
+                                type="text" 
+                                class="input input-bordered input-sm w-full font-mono shadow-inner"
+                                placeholder="Enter Turing Machine alphabet characters - leave empty to automatically infer"
+                                value={(*allowed_alphabet).clone()}
+                                oninput={on_alphabet_change}
+                                disabled={*is_analysing}
+                            />
+                        </div>
+                    }
+                } else {
+                    html! {
+                        <textarea 
+                            class="textarea textarea-bordered w-full font-mono text-sm shadow-inner resize-none leading-relaxed"
+                            rows="2"
+                            value={(*regex_input).clone()}
+                            oninput={on_input_change}
+                            disabled={*is_analysing}
+                            placeholder="Enter Regex input generation expression"
+                            style="overflow: hidden;"
+                        />
+                    }
+                }}
+                <div style="display: flex; justify-content: flex-end; width: 100%; margin-top: 0.75rem; gap: 10px;">                        
+                    { if !*is_automatic {
+                        html! {
+                            <div style="display: flex; align-items: center; gap: 0.5rem;">
+                            <span class="text-sm">{"Attempts:"}</span>
+                            <select 
+                                class="select select-bordered select-sm" 
+                                onchange={on_attempts_change} 
+                                disabled={*is_analysing} 
+                                value={(*generation_attempts).clone().to_string()}
+                            >
+                                <option value="1" selected={*generation_attempts == 1}>{"1"}</option>
+                                <option value="2" selected={*generation_attempts == 2}>{"2"}</option>
+                                <option value="5" selected={*generation_attempts == 5}>{"5"}</option>
+                                <option value="10" selected={*generation_attempts == 10}>{"10"}</option>
+                            </select>
+                            </div>   
+                        }
+                    } else {
+                        html! {
+                            <label class="cursor-pointer" style="display: flex; align-items: center; gap: 0.5rem;">
+                            <span class="text-sm">{"Performance Mode"}</span>
+                            <input 
+                                type="checkbox" 
+                                class="checkbox checkbox-sm checkbox-primary" 
+                                checked={(*is_low_performance).clone()} 
+                                onchange={on_performance_change} 
+                                disabled={*is_analysing} 
+                            />
+                            </label>
+                        }
+                    }}
+
                     <label class="cursor-pointer" style="display: flex; align-items: center; gap: 0.5rem;">
                         <span class="text-sm">{"Analyse Accepted Only"}</span>
                         <input 
@@ -212,26 +348,11 @@ pub fn complexity_analyser(props: &AnalyserProps) -> Html {
                             disabled={*is_analysing} 
                         />
                     </label>
-                        
-                    <div style="display: flex; align-items: center; gap: 0.5rem;">
-                        <span class="text-sm">{"Attempts:"}</span>
-                        <select 
-                            class="select select-bordered select-sm" 
-                            onchange={on_attempts_change} 
-                            disabled={*is_analysing} 
-                            value={(*generation_attempts).clone().to_string()}
-                        >
-                            <option value="1" selected={*generation_attempts == 1}>{"1"}</option>
-                            <option value="2" selected={*generation_attempts == 2}>{"2"}</option>
-                            <option value="5" selected={*generation_attempts == 5}>{"5"}</option>
-                            <option value="10" selected={*generation_attempts == 10}>{"10"}</option>
-                        </select>
-                    </div>
 
                     <button 
                         class="btn btn-primary px-8"
                         onclick={on_analyse_click} 
-                        disabled={*is_analysing || regex_input.is_empty()}
+                        disabled={*is_analysing || (!*is_automatic && regex_input.is_empty())}
                     >
                         { if *is_analysing { "Simulating Machine" } else { "Run Analysis" } }
                     </button>
@@ -240,12 +361,16 @@ pub fn complexity_analyser(props: &AnalyserProps) -> Html {
                 {
                     match &*analysis_result {
                         None => html! {},
+                        // styled similarly to the program_editor.rs error box
                         Some(Err(e)) => html! {
-                            <div 
-                                class="alert alert-error shadow-sm mt-4"
-                                style="padding-top: 30px;"
-                            >
-                                <span>{ format!("{}", e) }</span>
+                            <div class="program-status error mt-4">
+                                <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
+                                    <path fill-rule="evenodd" d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-7 4a1 1 0 11-2 0 1 1 0 012 0zm-1-9a1 1 0 00-1 1v4a1 1 0 102 0V6a1 1 0 00-1-1z" clip-rule="evenodd" />
+                                </svg>
+                                <span>
+                                    <strong>{"Analysis Error"}</strong>
+                                    <pre class="text-xs mt-1 opacity-90" style="white-space: pre-wrap; font-family: inherit;">{ e.clone() }</pre>
+                                </span>
                             </div>
                         },
                         Some(Ok(info)) => {
@@ -262,7 +387,8 @@ pub fn complexity_analyser(props: &AnalyserProps) -> Html {
                                         <h3 class="font-bold text-lg text-white" style="margin: 0;">{"Total Runtime Graph"}</h3>
                                         <RuntimeChart 
                                             id={"overall-chart".to_string()} 
-                                            data={info.graph_data.clone()} 
+                                            data={info.graph_data.clone()}
+                                            input_map={info.input_map.clone()}
                                             is_small={false}
                                         />
 
@@ -280,8 +406,8 @@ pub fn complexity_analyser(props: &AnalyserProps) -> Html {
                                             <div style="overflow-y: auto; display: flex; flex-direction: column; width: 100%;">
                                                 
                                                 <div class="bg-base-300 text-white" style="display: flex; width: 100%; border-bottom: 1px solid rgba(128,128,128,0.2);">
-                                                    <div style="width: 15%; padding: 0.5rem; font-size: 0.875rem; text-align: center;">{"State"}</div>
-                                                    <div style="width: 15%; padding: 0.5rem; font-size: 0.875rem; text-align: center;">{"Time"}</div>
+                                                    <div style="width: 15%; padding: 0.5rem; font-size: 0.875rem; text-align: center; word-break: break-word;">{"State"}</div>
+                                                    <div style="width: 15%; padding: 0.5rem; font-size: 0.875rem; text-align: center; word-break: break-word;">{"Time"}</div>
                                                     <div style="width: 70%; padding: 0.5rem; font-size: 0.875rem; text-align: center;">{"Runtime Graph"}</div>
                                                 </div>
                                                 
@@ -291,7 +417,7 @@ pub fn complexity_analyser(props: &AnalyserProps) -> Html {
 
                                                         html! {
                                                             <div key={state.to_string()} class="hover:bg-base-200 transition-colors" style="display: flex; width: 100%; border-bottom: 1px solid rgba(128,128,128,0.2);">
-                                                                <div style="width: 15%; padding: 0.5rem; font-family: monospace; font-size: 0.875rem; display: flex; align-items: center; border-right: 1px solid rgba(128,128,128,0.2); overflow: hidden; text-overflow: ellipsis; text-align: center;">
+                                                                <div style="width: 15%; padding: 0.5rem; font-family: monospace; font-size: 0.875rem; display: flex; align-items: center; border-right: 1px solid rgba(128,128,128,0.2); overflow: hidden; word-break: break-word; text-align: center;">
                                                                     { state }
                                                                 </div>
                                                                 <div class="text-primary" style="width: 15%; padding: 0.5rem; font-weight: bold; font-size: 0.875rem; display: flex; align-items: center; border-right: 1px solid rgba(128,128,128,0.2); overflow: hidden; text-overflow: ellipsis; text-align: center;">
@@ -301,6 +427,7 @@ pub fn complexity_analyser(props: &AnalyserProps) -> Html {
                                                                     <RuntimeChart
                                                                         id={format!("state-chart-{}", i)}
                                                                         data={state_data}
+                                                                        input_map={info.input_map.clone()}
                                                                         is_small={true}
                                                                     />
                                                                 </div>
@@ -319,29 +446,24 @@ pub fn complexity_analyser(props: &AnalyserProps) -> Html {
                 }
 
                 <dialog
-                    id="analysis_help_modal"
-                    class={classes!("modal", if *modal_opened { Some("modal-open") } else { None })}
-                    onkeydown={on_modal_keydown}
+                    id="regex_help_modal"
+                    class={classes!("modal", if *regex_modal_opened { Some("modal-open") } else { None })}
+                    onkeydown={on_modal_keydown.clone()}
                 >
                     <div class="modal-box relative" style="min-width: 50%; max-height: 90%;" onclick={Callback::from(|e: MouseEvent| e.stop_propagation())}>
                         <button
                             class="modal-close-btn"
-                            onclick={close_modal.clone()}
+                            onclick={close_regex_modal.clone()}
                             style="position: absolute; top: 8px; right: 8px; display: flex; align-items: center; justify-content: center; font-size: 18px; line-height: 1; z-index: 10;"
                         >
                             {"×"}
                         </button>
                         
-                        <h3 class="font-bold text-lg">{"Complexity Analysis Help"}</h3>
+                        <h3 class="font-bold text-lg">{"RegEx Analysis Help"}</h3>
                         <div class="help-content">
                             <h4 class="help-heading">{"The Premise:"}</h4>
                             <p class="help-paragraph">{"
-                            Time Complexity analysis of a Turing Machine is done by providing it with inputs and measuring the number of steps taken for that input to terminate. 
-                            This can require a large number of inputs to do correctly, and many simple Turing Machines are highly formulaic, making this a waste of time.
-                            Therefore, a variant of regular expressions can be used here to automatically generate expressions.
-                            "}</p>
-                            <p class="help-paragraph">{"
-                            This analyser currently only supports single-tape Turing Machines.
+                            This method uses RegEx-generated expressions to semi-automatically produce runtimes for the Turing Machine. Currently, only single-tape Turing Machines are supported. 
                             "}</p>
 
                             <h4 class="help-heading">{"Regular Expressions:"}</h4>
@@ -355,29 +477,20 @@ pub fn complexity_analyser(props: &AnalyserProps) -> Html {
                                 <li class="help-list-item">{"A simple even number generator: "}<code>{"1(1|0)*0"}</code></li>
                             </ul>
                             <p class="help-paragraph">
-                                {"Ranges (i.e. a-z) are not supported due to them being generally unnecessary during generation - if a-z is accepted, so is just a."}
-                            </p>
-                            <p class="help-paragraph">
-                                {"Multiple expressions can be provided at once. Expressions should be delimited with the ';' character. Additionally, reserved characters (i.e. {, *, +, ;) can be used 
-                                as literals through escaping with the '\\' character."}
+                                {"Multiple expressions may be provided at once, delimited by the ';' character. Characters may be escaped with the '\\' character. Ranges (i.e. a-z) are not supported."}
                             </p>
 
 
                             <h4 class="help-heading">{"Advanced Features:"}</h4>
                             <p class="help-paragraph">{"
                             Additionally supported are mathematical operations within ranges, supporting variables which are intelligently assigned during analysis. 
-                            This allows for limited context preservation, enabling some more complex Turing Machines to be analysed and partially rectifying the capability gap between 
-                            standard RegEx and Turing Machines. For example:
+                            This allows for limited context preservation, enabling some more complex Turing Machines to be analysed. For example:
                             "}</p>
                             <ul class="help-list">
                                 <li class="help-list-item">{"A generator for outputs of square sizes: "} <code>{"0{n * n}"}</code></li>
                                 <li class="help-list-item">{"A generator for outputs with 1 less 'a' than 'b' than 'c': "} <code>{"a{n}b{n + 1}c{n + 2}"}</code></li>
                                 <li class="help-list-item">{"A generator with specific bounds on outputs: "} <code>{"a{n}b{n * 2 + x}c{x - n}"}</code></li>
                             </ul>
-                            <p class="help-paragraph">{"
-                            As such, it can be observed that this language has non-regular capabilities through violating the "}<a href="https://en.wikipedia.org/wiki/Pumping_lemma_for_regular_languages" target="_blank" style="text-decoration: underline; color: rgb(142, 155, 255);">{"pumping lemma for regular languages"}</a>
-                            {". There are no specific bounds on the number of variables, but higher numbers of variables and more restrictive bounds may lead to longer processing times or failure to generate outputs.
-                            "}</p>
                             <p class="help-paragraph">{"
                             Also given are advanced options next to the Run Analysis button. These function as follows: 
                             "}</p>
@@ -388,9 +501,50 @@ pub fn complexity_analyser(props: &AnalyserProps) -> Html {
                         </div>
                     </div>
                     
-                    <form method="dialog" class="modal-backdrop" onclick={close_modal.clone()}>
+                    <form method="dialog" class="modal-backdrop" onclick={close_regex_modal.clone()}>
                         <button>{"close"}</button>
                     </form>
+                </dialog>
+
+                <dialog
+                    id="ga_help_modal"
+                    class={classes!("modal", if *ga_modal_opened { Some("modal-open") } else { None })}
+                    onkeydown={on_modal_keydown.clone()}
+                >
+                    <div class="modal-box relative" style="min-width: 50%; max-height: 90%;" onclick={Callback::from(|e: MouseEvent| e.stop_propagation())}>
+                        <button
+                            class="modal-close-btn"
+                            onclick={close_ga_modal.clone()}
+                            style="position: absolute; top: 8px; right: 8px; display: flex; align-items: center; justify-content: center; font-size: 18px; line-height: 1; z-index: 10;"
+                        >
+                            {"×"}
+                        </button>
+                        
+                        <h3 class="font-bold text-lg">{"Genetic Algorithm Analysis Help"}</h3>
+                        <div class="help-content">
+                            <h4 class="help-heading">{"The Premise:"}</h4>
+                            <p class="help-paragraph">{"
+                            This method uses Genetic Algorithm generated expressions to fully automatically produce runtimes for the Turing Machine. Currently, only single-tape Turing Machines are supported. 
+                            "}</p>
+
+                            <h4 class="help-heading">{"Genetic Algorithms:"}</h4>
+                            <p class="help-paragraph">{"
+                            The genetic algorithms used here operate through generating initially random inputs from an inferred or explicitly provided alphabet, before continually splicing
+                            and mutating entries to get the inputs with the highest runtime for each length. Genetic algorithms work best when an algorithm is highly pattern based and contains no 
+                            easily accessible infinite loops.
+                            "}</p>
+
+                            <h4 class="help-heading">{"Advanced Features:"}</h4>
+                            <p class="help-paragraph">{"
+                            Options are provided to allow for better tuning of the algorithms used to a specific machine. These function as follows:
+                            "}</p>
+                            <ul class="help-list">
+                                <li class="help-list-item">{"Alphabet Entry: Allows for specification of a custom alphabet. Accepts a string of characters which the algorithm should use to generate from. The primary purpose is to ensure that processing marker characters are not used in generation"}</li>
+                                <li class="help-list-item">{"Performance Mode: Runs significantly fewer generations on a lower population size. Recommended for highly complex machines and users on low-performance devices"}</li>
+                                <li class="help-list-item">{"Analyse Accepted Only: Only adds generated inputs which end in a state containing \"accept\" to the end analysis"}</li>
+                            </ul>
+                        </div>
+                    </div>
                 </dialog>
             </div>
         </div>

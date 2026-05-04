@@ -54,7 +54,7 @@ pub fn tape_view(props: &TapeViewProps) -> Html {
                             onclick={props.on_toggle_auto.reform(|_| ())}
                             disabled={!is_machine_running || !props.is_program_ready}
                         >
-                            {if props.auto_play { "Pause" } else { "Auto-Step" }}
+                            {if props.auto_play { "Pause" } else { "Auto" }}
                         </button>
 
                         <div class="speed-control">

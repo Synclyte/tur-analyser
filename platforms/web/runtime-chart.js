@@ -1,7 +1,35 @@
 // js intermediate layer between plot.js and rust - provides a function to be called by rust
 window.chartInstances = window.chartInstances || {};
 
-export function draw_runtime_chart(canvas_id, x_data, y_data, is_small) {
+function addStringTooltips(stringArray) {
+  return function(context) {
+    const index = context.dataIndex;
+    const inputString = stringArray[index];
+
+    // if the label is provided with an array of strings, it displays them line-by-line
+    // this allows for the full input string to always be displayed within reasonable horizontal space
+    if (inputString && inputString !== "") {
+      const lineLength = 30;
+      const lines = []
+      for (let i = 0; i < inputString.length; i += lineLength) {
+        lines.push(inputString.slice(i, i + lineLength));
+      }
+
+      const formattedLines = []
+      for (let i = 0; i < lines.length; i++) {
+        if (i === 0 && lines.length === 1) formattedLines.push(`Input: "${lines[i]}"`)
+        else if (i === 0) formattedLines.push(`Input: "${lines[i]}`)
+        else if (i === lines.length - 1) formattedLines.push(`        ${lines[i]}"`)
+        else formattedLines.push(`        ${lines[i]}`)
+      }
+
+      return formattedLines;
+    }
+    return null;
+  }
+}
+
+export function draw_runtime_chart(canvas_id, x_data, y_data, string_data, is_small) {
   const ctx = document.getElementById(canvas_id);
   if (!ctx) return;
   if (window.chartInstances[canvas_id]) window.chartInstances[canvas_id].destroy();
@@ -37,6 +65,10 @@ export function draw_runtime_chart(canvas_id, x_data, y_data, is_small) {
         plugins: {
           legend: { display: false },
           tooltip: {
+            // a callback is necessary due to it being impossible to store tooltip strings as a chart.js property
+            callbacks: {
+              afterLabel: addStringTooltips(string_data)
+            },
             backgroundColor: 'rgba(0, 0, 0, 0.8)',
             titleFont: { family: fontMono },
             bodyFont: { family: fontMono },
@@ -79,6 +111,9 @@ export function draw_runtime_chart(canvas_id, x_data, y_data, is_small) {
         plugins: {
           legend: { display: false },
           tooltip: {
+            callbacks: {
+              afterLabel: addStringTooltips(string_data)
+            },
             backgroundColor: 'rgba(0, 0, 0, 0.8)',
             titleFont: { family: fontMono },
             bodyFont: { family: fontMono },
