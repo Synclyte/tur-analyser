@@ -54,7 +54,7 @@ export function draw_runtime_chart(canvas_id, x_data, y_data, string_data, is_sm
           backgroundColor: primaryColour,
           tension: 0.4, // determines line curvature
           pointRadius: 3,
-          pointHoverRadius: 6,
+          pointHoverRadius: 7,
           spanGaps: true,
         }]
       },
@@ -100,7 +100,7 @@ export function draw_runtime_chart(canvas_id, x_data, y_data, string_data, is_sm
           backgroundColor: primaryColour,
           tension: 0.2, // determines line curvature
           pointRadius: 2,
-          pointHoverRadius: 4,
+          pointHoverRadius: 7,
           spanGaps: true,
         }]
       },

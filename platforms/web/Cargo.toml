@@ -23,8 +23,6 @@ gloo-timers = { version = "0.3", features = ["futures"] }
 gloo-events = "0.2"
 regex = "1.10"
 keymap = { version = "1.0.0-rc.3", features = ["wasm"] }
-plotters = "0.3"
-plotters-canvas = "0.3"
 getrandom = { version = "0.3", features = ["wasm_js"] }
 
 [features]

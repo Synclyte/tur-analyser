@@ -1,12 +1,12 @@
-name: Broken Subtraction
-tape: 1, 1, 1, -, 1, 1
+name: Fixed Subtraction
+tape: 1, 1, 1, 1, -, 1, 1, 1
 head: 0
 
 rules:
   start:
     1 -> 1, R, start
     - -> -, R, s1
-    _ -> _, L, stop
+    _ -> _, R, start
   s1:
     1 -> 1, R, s1
     _ -> _, L, s2

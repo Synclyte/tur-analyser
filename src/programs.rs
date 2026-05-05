@@ -3,12 +3,13 @@ use crate::types::{Program, TuringMachineError};
 use std::sync::RwLock;
 
 // Default embedded programs
-const PROGRAM_TEXTS: [&str; 9] = [
+const PROGRAM_TEXTS: [&str; 10] = [
     include_str!("../examples/binary-addition.tur"),
     include_str!("../examples/even-zeros-and-ones.tur"),
     include_str!("../examples/event-number-checker.tur"),
     include_str!("../examples/palindrome.tur"),
     include_str!("../examples/subtraction.tur"),
+    include_str!("../examples/subtraction-fixed.tur"),
     include_str!("../examples/busy-beaver-3.tur"),
     include_str!("../examples/multi-tape-copy.tur"),
     include_str!("../examples/multi-tape-addition.tur"),
