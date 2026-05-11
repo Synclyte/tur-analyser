@@ -242,7 +242,7 @@ impl ExpressionParser {
                     index = result_pair.1;
                 }
                 // handles invalid bracketing - valid bracketing handled at the start of the loop
-                ']' | ')' | '}' => {
+                ')' | '}' => {
                     return Err(format!("Error: Received invalid bracketing configuration at index {} - received unmatched {}", index, next_char));
                 }
                 _ => {
@@ -786,7 +786,7 @@ impl ContextToken {
 
         let mut best_vars = var_state.clone();
         let mut best_diff = calculate_difference_from_target(&var_state);
-        let init_temp = target_length as f64;
+        let init_temp = (target_length as f64).max(1.0);
 
         // for each iteration, run a basic annealer:
         // mutate a random variable
@@ -799,7 +799,7 @@ impl ContextToken {
                 return best_vars;
             }
 
-            let temp = init_temp * (1f64 - i as f64 / max_iterations as f64);
+            let temp: f64 = init_temp * (1f64 - i as f64 / max_iterations as f64);
             let mut mutated_vars = var_state.clone();
             Self::mutate_variable(&mut mutated_vars, &dependency_graph.order, rng);
             Self::enforce_constraints(&mut mutated_vars, &dependency_graph);
@@ -809,7 +809,7 @@ impl ContextToken {
             let acceptance_probability: f64 = if length_change < 0.0 { 1.0 }
             else { (-length_change / temp).exp() };
 
-            if rng.random_range(0.0..=1.0) <= acceptance_probability {
+            if rng.random_bool(acceptance_probability) {
                 var_state = mutated_vars;
 
                 if mutated_diff < best_diff {
@@ -861,7 +861,7 @@ impl ContextToken {
     }
 
     /// implementation of Kahn's algorithm (topological sorting) https://en.wikipedia.org/wiki/Topological_sorting#Kahn's_algorithm
-    /// essentially just a rust translation of the wikipedia page pseudocode
+    /// this is a rust translation of the wikipedia page pseudocode
     fn get_dependency_graph(&self) -> DependencyGraph {
         let mut adjacency_graph: HashMap<String, HashSet<String>> = HashMap::new();
         let mut constraints: Vec<Constraint> = Vec::new();
@@ -1054,8 +1054,6 @@ pub struct AnalysisInfo {
 }
 
 #[derive(Debug, Clone, PartialEq, PartialOrd, Eq, Ord, Copy)]
-// could add more. each just needs a corresponding complexity function definition, but the more there are the higher the chance of an incorrect classification
-// due to the impact of lesser terms
 pub enum Complexity {
     Unknown = isize::MIN,
     Constant = 0,
@@ -1274,8 +1272,7 @@ fn estimate_complexity(machine_points: &mut Vec<(usize, usize)>) -> Complexity {
         // now calculates residual error by using the constant multiplier. the complexity with the lowest adjusted error is the most likely complexity
         let mut residual_sum: f64 = 0f64;
         for &(index, value) in machine_points.iter() {
-            // standard rss * weighting - higher indices are more trustworthy as higher time complexities are more prominent as n tends to infinity
-            residual_sum += (value as f64 - b * complexity_function(index)).powi(2) * ((index as f64).sqrt());
+            residual_sum += (value as f64 - b * complexity_function(index)).powi(2);
         }
 
         if residual_sum < best_error {
@@ -1500,7 +1497,7 @@ fn generate_genetically(program: &Program, length: usize, alphabet: &Vec<char>, 
             // single point crossover gene splicing 
             let mut child = format!("{}{}", &parent_a[..crossover_point], &parent_b[crossover_point..]);
 
-            // 20% base mutation chance, mutation count determined by length
+            // modifies dependent on a base mutation chance - mutation count determined by another random roll dependent on string length
             if length > 0 && rng.random_bool(base_mutation_chance) {
                 let mutation_count = rng.random_range(1..=(length / 10).max(1));
                 for _ in 0..mutation_count {
@@ -2314,41 +2311,108 @@ mod tests {
 mod benchmarks {
     use super::*;
     use std::time::Instant;
+    use crate::programs::ProgramManager;
 
-    fn benchmark_input(input_str: &str, generation_range: Range<usize>, benchmark_name: &str) {
-        let max_generations = 100;
-        let mut rng = StdRng::seed_from_u64(0);
+    mod regex {
+        use super::*;
 
-        let start = Instant::now();
-        let token = ExpressionParser::produce_token(input_str).unwrap();
-        let generated_strings = token.generate_seeded_strings_in_range(generation_range.clone(), max_generations, &mut rng);
-        let elapsed = Instant::now() - start;
+        fn benchmark_input(input_str: &str, generation_range: Range<usize>, benchmark_name: &str) {
+            let max_generations = 100;
+            let mut rng = StdRng::seed_from_u64(0);
 
-        println!("Benchmark '{}'\nInput String: {}\nTime Elapsed: {:<7?}\nSearch Range: {}..{}\nStrings Generated: {}\n", benchmark_name, input_str, elapsed, generation_range.start, generation_range.end, generated_strings.len())
+            let start = Instant::now();
+            let token = ExpressionParser::produce_token(input_str).unwrap();
+            let generated_strings = token.generate_seeded_strings_in_range(generation_range.clone(), max_generations, &mut rng);
+            let elapsed = Instant::now() - start;
+
+            println!("Benchmark '{}'\nInput String: {}\nTime Elapsed: {:<7?}\nSearch Range: {}..{}\nStrings Generated: {}\n", benchmark_name, input_str, elapsed, generation_range.start, generation_range.end, generated_strings.len())
+        }
+    
+        #[test]
+        fn simple_string() {
+            benchmark_input("a{,}", 0..100, "Simple Linear Regex");
+        }
+
+        #[test]
+        fn choice_nonatomic_string() {
+            benchmark_input("(aaa|bbbbb){,}", 0..50, "Simple Non-Atomic String");
+        }
+
+        #[test]
+        fn simple_variable_bound_string() {
+            benchmark_input("a{x}b{x}", 0..50, "Simple Variable-Bounded String");
+        }
+
+        #[test]
+        fn complex_variable_bound_string() {
+            benchmark_input("(a{3x, y + 5 + z - x}(b|c){y, 6x}){x - z}", 0..50, "Complex Variable-Bounded String");
+        }
+
+        #[test]
+        fn complex_choice_string() {
+            benchmark_input("((((a|b|c|d|e){5})|fff){2})|g{, 10}", 0..50, "Complex Choice String");
+        }
     }
 
-    #[test]
-    fn simple_string() {
-        benchmark_input("a{,}", 0..100, "Simple Linear Regex");
-    }
+    mod system {
+        use super::*;
 
-    #[test]
-    fn choice_nonatomic_string() {
-        benchmark_input("(aaa|bbbbb){,}", 0..50, "Simple Non-Atomic String");
-    }
+        fn benchmark_system(machine_index: usize, regex_input: &str) {
+            if let Err(e) = ProgramManager::load() {
+                println!("Failed to load program manager correctly: {}", e);
+                return;
+            }
 
-    #[test]
-    fn simple_variable_bound_string() {
-        benchmark_input("a{x}b{x}", 0..50, "Simple Variable-Bounded String");
-    }
+            let program = match ProgramManager::get_program_by_index(machine_index) {
+                Ok(p) => p,
+                Err(_) => {
+                    println!("Failed to get program with index '{}'", machine_index);
+                    return;
+                }
+            };
 
-    #[test]
-    fn complex_variable_bound_string() {
-        benchmark_input("(a{3x, y + 5 + z - x}(b|c){y, 6x}){x - z}", 0..50, "Complex Variable-Bounded String");
-    }
+            let (regex_elapsed, regex_complexity) = analyse_function(|| analyse_expression(regex_input, &program, false, 1));
+            let (ga_elapsed, ga_complexity) = analyse_function(|| analyse_automatic(&program, false, false, "".to_string()));
 
-    #[test]
-    fn complex_choice_string() {
-        benchmark_input("((((a|b|c|d|e){5})|fff){2})|g{, 10}", 0..50, "Complex Choice String");
+            println!("{}\nRegEx Time: {}ms | RegEx Complexity Estimation: {}\nGA Time: {}ms | GA Complexity Estimation: {}", program.name, regex_elapsed, regex_complexity, ga_elapsed, ga_complexity);
+        }
+
+        fn analyse_function(function: impl Fn() -> Result<AnalysisInfo, String>) -> (u128, String) {
+            let fn_start = Instant::now();
+            let fn_result = function();
+            let fn_elapsed = fn_start.elapsed().as_millis();
+
+            let fn_complexity = match fn_result {
+                Ok(analysis_info) => analysis_info.estimated_complexity.to_string(),
+                Err(_) => "None".to_string(),
+            };
+
+            return (fn_elapsed, fn_complexity);
+        }
+
+        #[test]
+        fn binary_addition() {
+            benchmark_system(0, "$(1)*");
+        }
+
+        #[test]
+        fn even_zeros_ones() {
+            benchmark_system(1, "0{a}1{a}");
+        }
+
+        #[test]
+        fn even_number() {
+            benchmark_system(2, "(0|1)*0");
+        }
+
+        #[test]
+        fn palindrome() {
+            benchmark_system(3, "(aa)*");
+        }
+
+        #[test]
+        fn subtraction() {
+            benchmark_system(5, "(1){a}-(1){a}");
+        }
     }
 }

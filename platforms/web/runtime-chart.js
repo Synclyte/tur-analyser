@@ -1,4 +1,4 @@
-// js intermediate layer between plot.js and rust - provides a function to be called by rust
+// js intermediate layer between chart.js and rust - provides a function to be called by rust
 window.chartInstances = window.chartInstances || {};
 
 function addStringTooltips(stringArray) {

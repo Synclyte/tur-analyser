@@ -12,7 +12,7 @@ pub const DEFAULT_BLANK_SYMBOL: char = ' ';
 /// A special input symbol used in program definitions to represent the blank symbol.
 pub const INPUT_BLANK_SYMBOL: char = '_';
 /// The maximum allowed size for a Turing Machine program in bytes.
-pub const MAX_PROGRAM_SIZE: usize = 65536; // 64KB
+pub const MAX_PROGRAM_SIZE: usize = 1048576; // 1MB
 /// The maximum number of steps to execute before halting.
 pub const MAX_EXECUTION_STEPS: usize = 10000;
 
