@@ -148,8 +148,8 @@ struct DependencyGraph {
 /// *    `a|b|c|d` - matches either `a`, `b`, `c`, or `d`
 /// *    `a|b|cd` - matches `a`, `b`, or `cd`
 /// # repetitions (repeats a given segment n times)
-/// *    `*` - 0 to infinity repetitions of literal
-/// *    `+` - 1 to infinity repetitions of literal
+/// *    `*` - at least 0 repetitions of literal
+/// *    `+` - at least 1 repetition of literal
 /// *    `?` - 0 or 1 repetition of literal
 /// *    `{a,b}` - a to b repetitions of literal
 /// *    `(ab|cd){3,12}` - matches `ab`, or `cd` between 3 and 12 times
@@ -861,7 +861,7 @@ impl ContextToken {
     }
 
     /// implementation of Kahn's algorithm (topological sorting) https://en.wikipedia.org/wiki/Topological_sorting#Kahn's_algorithm
-    /// this is a rust translation of the wikipedia page pseudocode
+    /// this is a rust translation of described pseudocode, with modifications to allow for acyclic graph processing
     fn get_dependency_graph(&self) -> DependencyGraph {
         let mut adjacency_graph: HashMap<String, HashSet<String>> = HashMap::new();
         let mut constraints: Vec<Constraint> = Vec::new();
@@ -890,7 +890,6 @@ impl ContextToken {
         // iterates through all of the nodes with no incoming edges
         // for each one, adds it to the `order` and decrements the degrees of all nodes which
         // this node shares a vertex with, as that vertex is no longer valid
-        // Kahn's algorithm pseudocode - https://en.wikipedia.org/wiki/Topological_sorting#Kahn's_algorithm
         while let Some(e) = element_queue.pop() {
             order.push(e.clone());
             if let Some(adj) = &adjacency_graph.get(&e) {
@@ -904,7 +903,7 @@ impl ContextToken {
             }
         }
 
-        // ensures determinism of hashmaps so seeds are not ignored
+        // ensures determinism of hashmaps so seeded randomness is not ignored - useful for testing
         let mut sorted_elements: Vec<String> = elements.into_iter().collect();
         sorted_elements.sort();
 
@@ -1300,7 +1299,7 @@ fn extract_alphabet(program: &Program) -> Result<Vec<char>, String> {
     Ok(alphabet)
 }
 
-pub fn analyse_automatic(program: &Program, strict: bool, low_performance: bool, custom_alphabet: String) -> Result<AnalysisInfo, String> {
+pub fn analyse_automatic(program: &Program, strict: bool, low_performance: bool, custom_alphabet: String, custom_range: Option<Range<usize>>) -> Result<AnalysisInfo, String> {
     // produces an alphabet from transitions to use as chromosones in GA
     let mut inferred_alphabet: Vec<char> = extract_alphabet(program)?;
 
@@ -1337,7 +1336,13 @@ pub fn analyse_automatic(program: &Program, strict: bool, low_performance: bool,
     let max_generations = if !low_performance {20} else {10};
     let base_mutation_chance = if !low_performance {0.2} else {0.3};
 
-    for length in 1..=max_length {
+    let search_range = if let Some(range) = custom_range {
+        range
+    } else {
+        1..(max_length + 1)
+    };
+
+    for length in search_range {
         // adds more generations and population early - early generations typically inform later generations
         // and come at a much reduced performance cost
         let modified_pop_size = population_size * (12 / (length + 2)).max(1);
@@ -1420,7 +1425,7 @@ fn generate_genetically(program: &Program, length: usize, alphabet: &Vec<char>, 
     let mut stagnant_generations = 0;
     let stagnant_breakpoint = 5;
 
-    // utilises the fact that a good input was previously generated, and assumes a pattern
+    // utilises previously good generated inputs and assumes a pattern
     // uses the previous best input to make inputs here.
     if !previous_best.is_empty() && previous_best.len() < length {
         let char_diff = length - previous_best.len();
@@ -1695,6 +1700,29 @@ mod tests {
                 let bound_str = ")5+4(".into();
                 assert!(parser.get_bound_from_string(&bound_str, 0).is_err());
             }
+
+            #[test]
+            fn error_when_empty_brackets() {
+                let mut parser = ExpressionParser::new();
+                let bound_str = "1+()".into();
+                assert!(parser.get_bound_from_string(&bound_str, 0).is_err());
+            }
+
+            #[test]
+            fn clamp_input() {
+                let mut parser = ExpressionParser::new();
+                let bound_str = "10000".into();
+                let bound = parser.get_bound_from_string(&bound_str, 0).unwrap();
+                let result = Bound::calculate_bound(&bound, &parser.context);
+                assert_eq!(result.unwrap(), REPEAT_LIMIT);
+            }
+
+            #[test]
+            fn error_when_invalid_input_chars() {
+                let mut parser = ExpressionParser::new();
+                let bound_str = "1%".into();
+                assert!(parser.get_bound_from_string(&bound_str, 0).is_err());
+            }
         }
 
         mod repetition_parser {
@@ -1809,9 +1837,6 @@ mod tests {
                 let sequence_token: Token = sequence(&[literal("a")]);
                 let captured_chars: &Vec<char> = &to_char_vec("{01+2+3+4,(1+2)-3*02+4*(4}");
                 let result_token = parser.parse_repetition(sequence_token, captured_chars, 0).unwrap().0;
-
-                parser.context.insert("a".into(), 2);
-                parser.context.insert("b".into(), 5);
 
                 match result_token {
                     Token::Repetition(_, bound_a, bound_b) => {
@@ -2372,7 +2397,7 @@ mod benchmarks {
             };
 
             let (regex_elapsed, regex_complexity) = analyse_function(|| analyse_expression(regex_input, &program, false, 1));
-            let (ga_elapsed, ga_complexity) = analyse_function(|| analyse_automatic(&program, false, false, "".to_string()));
+            let (ga_elapsed, ga_complexity) = analyse_function(|| analyse_automatic(&program, false, false, "".to_string(), None));
 
             println!("{}\nRegEx Time: {}ms | RegEx Complexity Estimation: {}\nGA Time: {}ms | GA Complexity Estimation: {}", program.name, regex_elapsed, regex_complexity, ga_elapsed, ga_complexity);
         }
@@ -2413,6 +2438,51 @@ mod benchmarks {
         #[test]
         fn subtraction() {
             benchmark_system(5, "(1){a}-(1){a}");
+        }
+
+        #[test]
+        fn ga_accuracy_benchmark() {
+            let repeats: usize = 10;
+            let max_length: usize = 30;
+
+            let tested_programs = vec![0, 1, 2, 3];
+            let expected_complexities = vec![Complexity::N, Complexity::N2, Complexity::N, Complexity::N2];
+
+            if let Err(e) = ProgramManager::load() {
+                println!("Failed to load program manager correctly: {}", e);
+                panic!();
+            }
+
+            for index in 0..tested_programs.len() {
+                let program = match ProgramManager::get_program_by_index(tested_programs[index]) {
+                    Ok(p) => p,
+                    Err(_) => {
+                        println!("Failed to get program with index '{}'", index);
+                        panic!();
+                    }
+                };
+                let estimated_complexity = expected_complexities[index];
+
+                let custom_alphabet: String = match index {
+                    3 => "ab".into(),
+                    _ => "".into()
+                };
+
+                let mut successes = 0;
+                for i in 2..=max_length {
+                    for _ in 0..repeats {
+                        if let Ok(result) = analyse_automatic(&program, false, false, custom_alphabet.clone(), Some(1..i)) {
+                            if result.estimated_complexity == estimated_complexity { successes += 1; }
+                        }
+                    }
+
+                    if successes != repeats {
+                        println!("Failed {} times at length {} in program {}", repeats - successes, i, program.name);
+                    }
+
+                    successes = 0;
+                }
+            }
         }
     }
 }

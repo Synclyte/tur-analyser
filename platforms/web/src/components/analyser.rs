@@ -182,7 +182,7 @@ pub fn complexity_analyser(props: &AnalyserProps) -> Html {
                 let _ = gloo_timers::future::sleep(std::time::Duration::from_millis(15)).await;
 
                 let result = if async_auto {
-                    analyse_automatic(&async_program, async_strict, async_performance, async_alphabet)
+                    analyse_automatic(&async_program, async_strict, async_performance, async_alphabet, None)
                 } else {
                     analyse_expression(&async_regex, &async_program, async_strict, async_attempts)
                 };
@@ -361,7 +361,7 @@ pub fn complexity_analyser(props: &AnalyserProps) -> Html {
                 {
                     match &*analysis_result {
                         None => html! {},
-                        // styled similarly to the program_editor.rs error box
+                        // style copied from pre-existing error box styling
                         Some(Err(e)) => html! {
                             <div class="program-status error mt-4">
                                 <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
