@@ -1334,7 +1334,7 @@ pub fn analyse_automatic(program: &Program, strict: bool, low_performance: bool,
     let max_length = if !low_performance {50} else {30};
     let population_size = if !low_performance {50} else {30};
     let max_generations = if !low_performance {20} else {10};
-    let base_mutation_chance = if !low_performance {0.2} else {0.3};
+    let base_mutation_chance = if !low_performance {0.03} else {0.05};
 
     let search_range = if let Some(range) = custom_range {
         range
