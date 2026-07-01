@@ -14,7 +14,7 @@ Modals are included which explain in greater detail how these operate. A summary
 
 <p>Uses a regular expression-like syntax to allow for guided generation of optimal inputs. Distinct from typical fuzzing approaches, the syntax allows for specification of variable-bounded ranges (i.e. (a){x * 2}(b){x} generating a sequence with two times more "a" than "b"). This significantly increases the expressiveness of the language, allowing it to represent many expressions far more complex than standard fuzzing would permit, necessary for the increased complexity associated with Turing machines.</p>
 
-<p>As this project is built on Tur, its own description is still relevant to the usage of this. It is included below</p>
+<p>As this project is built on Tur, its own description is still relevant to the usage of this. It is included below. Note that this project is only built for the web release of Tur, and is not integrated into the CLI/TUI versions of this project.</p>
 
 <h1>Tur - Turing Machine Language</h1>
 
