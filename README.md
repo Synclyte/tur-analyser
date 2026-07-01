@@ -1,4 +1,22 @@
-# Tur - Turing Machine Language
+<h1>Tur Analyser</h1>
+
+<p>This project is an extension of the pre-existing <a href="https://github.com/rezigned/tur">Tur project</a>, modified to include an additional section for the runtime analysis of designed Turing machines. This analysis is split across two methods:<ul>
+<li>Genetic Algorithm-based analysis</li>
+<li>Grammatical Fuzzing-based analysis</li></ul>
+Modals are included which explain in greater detail how these operate. A summary is included below to briefly explain these methods and their usage.
+</p>
+
+<h3>Genetic Algorithm-based Analysis</h3>
+
+<p>Uses a classic genetic algorithm based approach; this approach performs gradient descent towards the optimally slow input for each input length using mutation and single-point crossover. This iteratively converges on a maxima, but is likely to miss the global maxima in high-dimensional search space. The input alphabet is assumed from the symbols present in transitions. This approach is entirely automatic, and requires no additional user input.</p>
+
+<h3>Grammatical Fuzzing-based Analysis</h3>
+
+<p>Uses a regular expression-like syntax to allow for guided generation of optimal inputs. Distinct from typical fuzzing approaches, the syntax allows for specification of variable-bounded ranges (i.e. (a){x * 2}(b){x} generating a sequence with two times more "a" than "b"). This significantly increases the expressiveness of the language, allowing it to represent many expressions far more complex than standard fuzzing would permit, necessary for the increased complexity associated with Turing machines.</p>
+
+<p>As this project is built on Tur, its own description is still relevant to the usage of this. It is included below</p>
+
+<h1>Tur - Turing Machine Language</h1>
 
 [![Crates.io](https://img.shields.io/crates/v/tur.svg)](https://crates.io/crates/tur) [![Docs.rs](https://docs.rs/tur/badge.svg)](https://docs.rs/tur) [![CI](https://github.com/rezigned/tur/actions/workflows/ci.yml/badge.svg)](https://github.com/rezigned/tur/actions/workflows/ci.yml)
 
